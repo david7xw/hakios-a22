@@ -1,12 +1,10 @@
-# Display on the A32: command-mode DSI, the watcher and the busy check
+# Display on the A22: command-mode DSI, the watcher and the busy check
 
-The panel is Samsung's `s6e3fc3_a32`, 1080×2400, in **command mode**: nothing is scanned out
-until the host writes a frame and kicks the DSI. Linux does this from the panel's own driver
-(`drivers/misc/mediatek/lcm/smcdsd_panel/panels/s6e3fc3_a32.c`, `DSI_WRITE(... DISPLAY_ON)`
-and the `update` path).
+The panel is Samsung's `s6e3fc3_a22` (rev 2), 720×1600, in **command mode**: nothing is scanned out
+until the host writes a frame and kicks the DSI (`mtk_dsi_kick`).
 
-LK leaves the display with OVL0 layer 0 pointing at its own framebuffer
-(`0x7c720000`, pitch `0x1100` = 736 pixels) and the panel already initialised. XNU's console
+LK leaves the display with OVL0 layer 0 pointing at its own framebuffer:
+`0x79c50000`, pitch `0x0b80` = 2944 bytes (736 pixels) and the panel already initialised. XNU's console
 writes `0x00rrggbb` and LK had per-pixel alpha on, which made those pixels transparent; the
 loader turns alpha off and gives XNU's colour table `0xff` alpha besides.
 
@@ -37,9 +35,8 @@ second frame was written over the first one's transfer and the panel stayed on t
 
 ## Result
 
-`xnu-a32-emmc-test28-busy.img` (four cores, `fbscale=3`) shows the full iOS 16.5 home screen:
-clock, battery, widgets, icons, dock, centred and with correct colours.
-
+`a22diag` proved the display pipeline: color bars and countdown showed crisply at 720×1600.
+`fbscale=2` gives native 360×800 logical points.
 ## Cores
 
 Six cores were tried and the phone ended in fastboot; eight leave no core for the watcher.
