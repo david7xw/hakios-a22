@@ -16,3 +16,16 @@ boot.img
 fw-*/
 logs/
 .DS_Store
+backup/
+downloads/
+prebuilt/
+sysimage/
+userland/obj/
+userland/root/
+userland/var/
+userland/flashboot.apfs
+userland/hello
+xnu-deps/
+hakios-kernel
+xnu-env.sh
+*.pem
