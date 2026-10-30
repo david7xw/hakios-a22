@@ -47,8 +47,11 @@ fi
 
 if command -v clang >/dev/null 2>&1 && (command -v ld.lld >/dev/null 2>&1 || command -v zig >/dev/null 2>&1); then
     CC="${CC:-clang}"
-    LLD="${LLD:-ld.lld}"
-    command -v "$LLD" >/dev/null 2>&1 || LLD="zig ld.lld"
+    if command -v ld.lld >/dev/null 2>&1; then
+        LLD=ld.lld
+    elif command -v zig >/dev/null 2>&1; then
+        LLD="zig ld.lld"
+    fi
     $CC $CFLAGS "$@" -c "$HERE/start.S" -o "$HERE/start.o"
     $CC $CFLAGS "$@" -c "$HERE/mtkloader.c" -o "$HERE/mtkloader.o"
     $LLD -T "$HERE/link.ld" --oformat binary "$HERE/start.o" "$HERE/mtkloader.o" -o "$HERE/mtkloader.bin"

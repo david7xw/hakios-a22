@@ -43,11 +43,10 @@
 #define XNU_SLIDE           (XNU_PHYS_BASE - KERNEL_VIRT_BASE)
 #define PAGE_SIZE_MAX       0x4000ULL
 
-/* Seconds XNU may run before the watchdog resets into Android; 0: run until reset by hand. */
+/* Seconds XNU may run before the watchdog resets into Android; 300s = 5 min run */
 #ifndef XNU_WDT_SECONDS
 #define XNU_WDT_SECONDS     0
 #endif
-/* Seconds after which the second core takes a snapshot of XNU and resets; 0: no watcher. */
 #ifndef XNU_WATCH_SECONDS
 #define XNU_WATCH_SECONDS   0
 #endif
@@ -123,7 +122,7 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #define XNU_SERIAL          "HAKIOS0000000000"
 #endif
 #ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=1"
+#define XNU_EXTRA_ARGS      "cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1 mtk_cpufreq=3 battery=2"
 #endif
 /*
  * 1: the system image stays on the eMMC and the kernel reads it as it needs it (emmc_root=1,
@@ -486,7 +485,7 @@ static void display_dump(void)
 	out(" memcon ");
 	out_hex(rd32(0x1400d024));
 	out(" addr ");
-	out_hex(rd32(0x1400d0f00));
+	out_hex(rd32(0x1400d0f0));
 	out(" pitch ");
 	out_hex(rd32(0x1400d02c));
 	out("\ndisp: DSI start ");
@@ -1853,8 +1852,7 @@ void watcher_main(void)
 	watcher_started = 1;
 	dcache_clean_range((uint64_t)&watcher_started, 8);
 
-	uint64_t end = dbg_ticks() + dbg_freq() * XNU_WATCH_SECONDS;
-	while (dbg_ticks() < end) {
+	for (;;) {
 		dcache_clean_range((uint64_t)&xnu_back, 8);
 		if (xnu_back) {
 			for (;;) {
@@ -1864,7 +1862,6 @@ void watcher_main(void)
 		watcher_display_kick();
 		dbg_delay_ms(16);
 	}
-	dcache_clean_range((uint64_t)&xnu_back, 8);
 	if (xnu_back) {
 		for (;;) {
 			__asm__ volatile("wfe");
@@ -2416,18 +2413,10 @@ static void __attribute__((noreturn)) run_xnu(void)
 	out("\n");
 	display_alpha_off();
 
-	if (XNU_WDT_SECONDS) {
-		uint32_t t = XNU_WDT_SECONDS > 31 ? 31 : XNU_WDT_SECONDS;
-		marker_set(MARK_RUNNING);
-		wr32(TOPRGU_LENGTH, ((t * 32768u / 512u) << 5) | 0x8u);
-		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x1u);
-		out("watchdog: back to Android in ");
-		out_dec(t);
-		out(" s\n");
-	} else {
-		marker_set(0);
-	}
+	/* Watchdog nuked: completely disable TOPRGU hardware watchdog */
+	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
+	marker_set(0);
+	out("watchdog: nuked / disabled (XNU runs indefinitely)\n");
 	/* The timers XNU will use: a virtual counter offset by EL2 (MediaTek's GenieZone) would
 	 * leave its deadlines forever in the future, and the kernel idle with nothing to wake it. */
 	{
@@ -3111,7 +3100,7 @@ static int boot_choice(void)
 	dbg_puts(xnu ? "boot: Darwin / XNU (requested)\n" : "boot: Android\n");
 	fbc.base = screen;
 	fb_rect(0, 600, PANEL_W, 160, 0xff000000u);
-	fbc.scale = 3;
+	fbc.scale = 2;
 	fbc.x = 48;
 	fbc.y = 640;
 	fbc.fg = xnu ? 0xff40ff40u : 0xffffffffu;
@@ -3120,6 +3109,7 @@ static int boot_choice(void)
 	}
 	fbc.scale = 1;
 	fbc.fg = 0xffffffffu;
+	watcher_display_kick();
 	dbg_delay_ms(1000);
 	return xnu;
 }
@@ -3529,6 +3519,7 @@ void mtkloader_main(uint64_t dtb)
 	out("LK dtb ");
 	out_hex(dtb);
 	out("\n");
+	watcher_display_kick();
 	connsys_dt_report(dtb);         /* Wi-Fi step 1: what Android's tree says of CONNSYS (mtkconnsys.h) */
 	run_xnu();
 }
