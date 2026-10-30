@@ -450,6 +450,87 @@ fts_write(uint8_t command, const uint8_t *data, unsigned length)
 	}
 	return false;
 }
+static bool
+i2c_reg_read_once(uint8_t addr, const uint8_t *cmd, unsigned cmd_len, uint8_t *data, unsigned length)
+{
+	unsigned i;
+	uint8_t waddr = (addr << 1);
+	uint8_t raddr = (addr << 1) | 1;
+
+	i2c_start();
+	if (!i2c_write_byte(waddr)) {
+		i2c_stop();
+		return false;
+	}
+	for (i = 0; i < cmd_len; i++) {
+		if (!i2c_write_byte(cmd[i])) {
+			i2c_stop();
+			return false;
+		}
+	}
+	i2c_start();
+	if (!i2c_write_byte(raddr)) {
+		i2c_stop();
+		return false;
+	}
+	for (i = 0; i < length; i++) {
+		data[i] = i2c_read_byte(i + 1 < length);
+	}
+	i2c_stop();
+	return true;
+}
+
+static bool
+i2c_reg_read(uint8_t addr, const uint8_t *cmd, unsigned cmd_len, uint8_t *data, unsigned length)
+{
+	for (unsigned attempt = 0; attempt < 3; attempt++) {
+		if (i2c_reg_read_once(addr, cmd, cmd_len, data, length)) {
+			return true;
+		}
+		i2c_recover();
+	}
+	return false;
+}
+static bool
+i2c_reg_write_once(uint8_t addr, const uint8_t *cmd, unsigned cmd_len, const uint8_t *data, unsigned length)
+{
+	unsigned i;
+	uint8_t waddr = (addr << 1);
+
+	i2c_start();
+	if (!i2c_write_byte(waddr)) {
+		i2c_stop();
+		return false;
+	}
+	for (i = 0; i < cmd_len; i++) {
+		if (!i2c_write_byte(cmd[i])) {
+			i2c_stop();
+			return false;
+		}
+	}
+	for (i = 0; i < length; i++) {
+		if (!i2c_write_byte(data[i])) {
+			i2c_stop();
+			return false;
+		}
+	}
+	i2c_stop();
+	return true;
+}
+
+static bool
+i2c_reg_write(uint8_t addr, const uint8_t *cmd, unsigned cmd_len, const uint8_t *data, unsigned length)
+{
+	for (unsigned attempt = 0; attempt < 3; attempt++) {
+		if (i2c_reg_write_once(addr, cmd, cmd_len, data, length)) {
+			return true;
+		}
+		i2c_recover();
+	}
+	return false;
+}
+
+
 
 /* ---- what the chip says ------------------------------------------------------------------ */
 
@@ -558,86 +639,162 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 
 	i2c_recover();
 
+	bool is_melfas = false;
+	uint8_t melfas_event_size = 6;
+
 	{
-		uint64_t before = mach_absolute_time(), after;
-		uint64_t ns;
+		memset(data, 0, sizeof(data));
+		if (fts_read(FTS_READ_DEVICE_ID, data, 5)) {
+			memcpy(device_id, data, sizeof(device_id));
+			have_device_id = true;
+			printf("fts: detected STM FTS5CU56A at 0x%02x\n", FTS_ADDRESS);
+		} else {
+			printf("fts: no STM at 0x49, probing Melfas at 0x48...\n");
+			uint8_t cmd_name[2] = { 0x01, 0x00 };
+			if (i2c_reg_read(0x48, cmd_name, 2, data, 16)) {
+				is_melfas = true;
+				uint8_t pwr_cmd[2] = { 0x06, 0x13 };
+				uint8_t pwr_mode = 0;
+				(void)i2c_reg_write(0x48, pwr_cmd, 2, &pwr_mode, 1);
+				uint8_t esd_cmd[2] = { 0x06, 0x18 };
+				uint8_t esd_val = 1;
+				(void)i2c_reg_write(0x48, esd_cmd, 2, &esd_val, 1);
+
+				uint8_t cmd_res[2] = { 0x01, 0x10 };
+				uint8_t res_buf[4];
+				if (i2c_reg_read(0x48, cmd_res, 2, res_buf, 4)) {
+					uint32_t rx = ((uint32_t)res_buf[1] << 8) | res_buf[0];
+					uint32_t ry = ((uint32_t)res_buf[3] << 8) | res_buf[2];
+					if (rx > 0 && rx < 65535) max_x = rx;
+					if (ry > 0 && ry < 65535) max_y = ry;
+				}
+				printf("melfas: detected Melfas MSS100 at 0x48 (active touch mode, %ux%u)\n", max_x + 1, max_y + 1);
+			} else {
+				printf("fts: no answer at 0x49 or 0x48 on i2c6 (gpio%u/gpio%u)\n", PIN_SCL, PIN_SDA);
+				thread_terminate(current_thread());
+				return;
+			}
+		}
+	}
+	if (!is_melfas) {
+		memset(data, 0, sizeof(data));
+		if (fts_read(FTS_READ_FW_VERSION, data, 9)) {
+			memcpy(firmware, data, sizeof(firmware));
+			have_firmware = true;
+			printf("fts: firmware %02x%02x config %02x%02x main %02x%02x project %02x ic %02x module %02x\n",
+			    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]);
+		}
 
 		memset(data, 0, sizeof(data));
-		if (!fts_read(FTS_READ_DEVICE_ID, data, 5)) {
-			printf("fts: no answer at 0x%02x on i2c6 (gpio%u/gpio%u): the address was not acknowledged\n",
-			    FTS_ADDRESS, PIN_SCL, PIN_SDA);
-			thread_terminate(current_thread());
-			return;
+		if (fts_read(FTS_READ_PANEL_INFO, data, 11)) {
+			uint32_t rx = ((uint32_t)data[0] << 8) | data[1];
+			uint32_t ry = ((uint32_t)data[2] << 8) | data[3];
+
+			memcpy(panel, data, sizeof(panel));
+			have_panel = true;
+			printf("fts: panel %ux%u, %u tx and %u rx nodes\n", rx, ry, data[8], data[9]);
+			if (rx > 0 && rx < 0xffff) {
+				max_x = rx;
+			}
+			if (ry > 0 && ry < 0xffff) {
+				max_y = ry;
+			}
 		}
-		after = mach_absolute_time();
-		absolutetime_to_nanoseconds(after - before, &ns);
-		memcpy(device_id, data, sizeof(device_id));
-		have_device_id = true;
-		printf("fts: device id %02x %02x %02x %02x %02x, a read takes %llu us%s\n",
-		    data[0], data[1], data[2], data[3], data[4], ns / 1000,
-		    (data[0] | data[1] | data[2] | data[3] | data[4]) ? "" : " (all zero: the bus answers but nothing drives it)");
-	}
 
-	memset(data, 0, sizeof(data));
-	if (fts_read(FTS_READ_FW_VERSION, data, 9)) {
-		memcpy(firmware, data, sizeof(firmware));
-		have_firmware = true;
-		printf("fts: firmware %02x%02x config %02x%02x main %02x%02x project %02x ic %02x module %02x\n",
-		    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]);
-	}
-
-	memset(data, 0, sizeof(data));
-	if (fts_read(FTS_READ_PANEL_INFO, data, 11)) {
-		uint32_t rx = ((uint32_t)data[0] << 8) | data[1];
-		uint32_t ry = ((uint32_t)data[2] << 8) | data[3];
-
-		memcpy(panel, data, sizeof(panel));
-		have_panel = true;
-		printf("fts: panel %ux%u, %u tx and %u rx nodes\n", rx, ry, data[8], data[9]);
-		if (rx > 0 && rx < 0xffff) {
-			max_x = rx;
+		/* Sense on, then drop whatever the chip queued while it was waking. */
+		if (!fts_write(FTS_CMD_SENSE_ON, NULL, 0)) {
+			printf("fts: sense on was not acknowledged\n");
 		}
-		if (ry > 0 && ry < 0xffff) {
-			max_y = ry;
-		}
+		sleep_us(30000);
+		(void)fts_write(FTS_CLEAR_ALL_EVENT, NULL, 0);
 	}
-
-	/* Sense on, then drop whatever the chip queued while it was waking. */
-	if (!fts_write(FTS_CMD_SENSE_ON, NULL, 0)) {
-		printf("fts: sense on was not acknowledged\n");
-	}
-	sleep_us(30000);
-	(void)fts_write(FTS_CLEAR_ALL_EVENT, NULL, 0);
-
 	printf("fts: touch screen ready; asked every %u us, %ux%u scaled to 65535\n", poll_us, max_x + 1, max_y + 1);
 
 	period = (uint64_t)60 * 1000000 / poll_us;
 	for (unsigned tick = 1;; tick++) {
 		unsigned got = 0;
 
-		for (unsigned i = 0; i < FTS_MAX_FINGERS; i++) {
-			if (!fts_read(FTS_READ_ONE_EVENT, data, FTS_EVENT_SIZE)) {
-				errors++;
-				break;
-			}
-			reads++;
-			if (data[0] == 0) {
-				break;          /* nothing waiting */
-			}
-			if ((data[0] & 3) == FTS_COORDINATE_EVENT) {
-				coordinate_event(data, &events, &touches);
-			} else if ((data[0] & 3) == FTS_STATUS_EVENT) {
-				memcpy(last_status, data, sizeof(last_status));
-				have_status = true;
-				if (status_events < 3) {
-					printf("fts: status event %02x %02x %02x %02x %02x %02x %02x %02x\n",
-					    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+		if (is_melfas) {
+			uint8_t cmd_info[2] = { 0x02, 0x10 };
+			uint8_t pkt_info = 0;
+			if (i2c_reg_read(0x48, cmd_info, 2, &pkt_info, 1)) {
+				reads++;
+				uint32_t cat = (pkt_info >> 7) & 1;
+				uint32_t num = pkt_info & 0x7f;
+				if (num > 0) {
+					uint8_t cmd_data[2] = { 0x02, 0x11 };
+					if (cat == 0) {
+						if (num > 10) num = 10;
+						uint32_t byte_len = num * 16;
+						uint8_t ev_buf[160];
+						if (i2c_reg_read(0x48, cmd_data, 2, ev_buf, byte_len)) {
+							for (uint32_t i = 0; i < num; i++) {
+								const uint8_t *p = &ev_buf[i * 16];
+								uint32_t action = (p[0] >> 6) & 3;
+								uint32_t raw_id = (p[0] >> 2) & 0xf;
+								if (raw_id >= 1 && raw_id <= 10 && action != 0) {
+									uint32_t id = raw_id - 1;
+									uint32_t x = ((uint32_t)p[1] << 4) | (p[3] >> 4);
+									uint32_t y = ((uint32_t)p[2] << 4) | (p[3] & 0xf);
+
+									if (action == FTS_ACTION_RELEASE && x == 0 && y == 0 && finger_down[id]) {
+										x = last_x[id];
+										y = last_y[id];
+									}
+									last_x[id] = (uint16_t)x;
+									last_y[id] = (uint16_t)y;
+
+									if (swap_axes) { uint32_t t = x; x = y; y = t; }
+									if (flip_x) { x = max_x - (x > max_x ? max_x : x); }
+									if (flip_y) { y = max_y - (y > max_y ? max_y : y); }
+
+									uint32_t sx = scale(x, max_x);
+									uint32_t sy = scale(y, max_y);
+
+									if (action == FTS_ACTION_PRESS || action == FTS_ACTION_MOVE) {
+										finger_down[id] = true;
+										hakios_touch_post(HAKIOS_TOUCH_DOWN, id, sx, sy);
+										touches++;
+									} else if (action == FTS_ACTION_RELEASE) {
+										finger_down[id] = false;
+										hakios_touch_post(HAKIOS_TOUCH_UP, id, sx, sy);
+									}
+									events++;
+									got++;
+								}
+							}
+						}
+					} else {
+						uint8_t drain[128];
+						uint32_t drain_len = num < 128 ? num : 128;
+						(void)i2c_reg_read(0x48, cmd_data, 2, drain, drain_len);
+						status_events++;
+					}
 				}
-				status_events++;
+			} else {
+				errors++;
 			}
-			got++;
-			if ((data[7] & 0x1f) == 0) {
-				break;
+		} else {
+			for (unsigned i = 0; i < FTS_MAX_FINGERS; i++) {
+				if (!fts_read(FTS_READ_ONE_EVENT, data, FTS_EVENT_SIZE)) {
+					errors++;
+					break;
+				}
+				reads++;
+				if (data[0] == 0) {
+					break;
+				}
+				if ((data[0] & 3) == FTS_COORDINATE_EVENT) {
+					coordinate_event(data, &events, &touches);
+				} else if ((data[0] & 3) == FTS_STATUS_EVENT) {
+					memcpy(last_status, data, sizeof(last_status));
+					have_status = true;
+					status_events++;
+				}
+				got++;
+				if ((data[7] & 0x1f) == 0) {
+					break;
+				}
 			}
 		}
 
