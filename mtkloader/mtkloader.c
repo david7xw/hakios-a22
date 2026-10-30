@@ -2006,9 +2006,6 @@ void watcher_main(void)
 
 static void watcher_start(void)
 {
-	if (!XNU_WATCH_SECONDS) {
-		return;
-	}
 	watcher_started = 0;
 	int64_t r = psci_cpu_on((uint64_t)WATCH_CORE << 8, (uint64_t)watcher_entry, 0);
 	out("watcher on cpu");
