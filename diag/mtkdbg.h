@@ -34,13 +34,14 @@
 #define TOPRGU_SWRST_KEY     0x1209u
 
 /* LK's framebuffer (mblock "framebuffer"), the layer LK shows the logo on. */
-#define LK_FB_BASE           0x78000000ULL  /* SM-A225F fallback; dynamically read from OVL0 */
-#define LK_FB_SIZE           0x04000000ULL
+#define LK_FB_BASE           0x79c50000ULL  /* SM-A225F: mblock-16-framebuffer */
+#define LK_FB_SIZE           0x01000000ULL  /* 16 MiB */
 #define LK_FB_PITCH          2944u          /* 736 pixels: LK aligns width 720 to 32 */
 #define PANEL_W              720u
 #define PANEL_H              1600u
 #define DISP_MUTEX_EN        0x14001020ULL
-#define DISP_MUTEX_RUN       0x14001024ULL
+#define DISP_MUTEX_SOF       0x1400102cULL
+#define DISP_MUTEX_MOD0      0x14001030ULL
 
 #define OVL0_BASE            0x1400b000ULL
 #define OVL_SRC_CON          0x02c      /* a bit per layer the hardware composes */

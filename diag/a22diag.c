@@ -17,7 +17,7 @@
 #include "mtkdbg.h"
 
 #define CHAIN_OFFSET  0x40000u
-#define KERNEL_PA     0x40110000ULL
+#define KERNEL_PA     0x40080000ULL
 #define STUB_PA       0x4a000000ULL
 
 extern char _start[];
@@ -71,6 +71,21 @@ fbdiag_fault(uint64_t vec, uint64_t esr, uint64_t elr, uint64_t far)
 	dbg_delay_ms(3000);
 	chain_android();
 }
+static void mtk_dsi_kick(void)
+{
+	if (rd32(0x1401400c) & 0x80000000u) {   /* DSI_BUSY */
+		return;
+	}
+	wr32(DISP_MUTEX_MOD0, 0x90380u);        /* OVL0|OVL0_2L|RDMA0|DSI0|PWM0 */
+	wr32(DISP_MUTEX_SOF, 0);
+	wr32(DISP_MUTEX_EN, 1);
+	wr32(0x140000f0, rd32(0x140000f0) | 1u);
+	wr32(0x14014200, 0x002c3909u);           /* DSI_CMDQ0: 0x2C write_memory_start */
+	wr32(0x14014060, 1);                     /* DSI_CMDQ_SIZE */
+	wr32(0x14014000, 0);
+	wr32(0x14014000, 1);
+	__asm__ volatile("dsb sy" ::: "memory");
+}
 
 static void
 bar(uint32_t y, uint32_t color, const char *label)
@@ -99,18 +114,21 @@ fbdiag_main(uint64_t dtb)
 	uint32_t pitch = LK_FB_PITCH;
 
 	chain_dtb = dtb;
-	wdt_disable();
+	/* Arm TOPRGU watchdog for 15s failsafe: if anything hangs, hardware warm resets to Android */
+	wr32(TOPRGU_LENGTH, ((15u * 32768u / 512u) << 5) | 0x8u);
+	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x1u);
 	plog_reset();
-
 	l0_addr = rd32(OVL0_BASE + OVL_L0_ADDR);
 	l0_pitch = rd32(OVL0_BASE + OVL_L0_PITCH) & 0xffff;
 	l0_con = rd32(OVL0_BASE + OVL_L0_CON);
+	/* Turn off per-pixel alpha on layer 0 so opaque pixels show */
+	wr32(OVL0_BASE + OVL_L0_CON, l0_con & ~(1u << 8));
 	if (l0_addr >= LK_FB_BASE && l0_addr < LK_FB_BASE + LK_FB_SIZE &&
 	    l0_pitch >= PANEL_W * 4 && l0_pitch <= 8192) {
 		fb = l0_addr;
 		pitch = l0_pitch;
 	}
-
 	fbcon_init(fb, pitch, 0, 1);
 	fbc.scale = 2;
 	fbc.x = 0;
@@ -152,11 +170,15 @@ fbdiag_main(uint64_t dtb)
 	dbg_hex(rd32(TOPRGU_MODE), 8);
 	dbg_puts("\n");
 	dbg_puts("Android in 10 s; log will be in pstore\n");
+	mtk_dsi_kick();
 
 	for (int s = 10; s > 0; s--) {
 		dbg_puts("a22diag: ");
 		dbg_dec(s);
 		dbg_puts("\n");
+		mtk_dsi_kick();
+		dbg_delay_ms(1000);
 	}
+	wdt_disable();
 	chain_android();
 }
