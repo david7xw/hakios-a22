@@ -9,6 +9,7 @@
 *.tar
 *.tar.xz
 mtkloader/font8x16.h
+diag/font8x16.h
 mtkloader/touchfw.h
 xnuloader/identity.h
 boot.img
