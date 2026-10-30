@@ -653,13 +653,6 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 			uint8_t cmd_name[2] = { 0x01, 0x00 };
 			if (i2c_reg_read(0x48, cmd_name, 2, data, 16)) {
 				is_melfas = true;
-				uint8_t pwr_cmd[2] = { 0x06, 0x13 };
-				uint8_t pwr_mode = 0;
-				(void)i2c_reg_write(0x48, pwr_cmd, 2, &pwr_mode, 1);
-				uint8_t esd_cmd[2] = { 0x06, 0x18 };
-				uint8_t esd_val = 1;
-				(void)i2c_reg_write(0x48, esd_cmd, 2, &esd_val, 1);
-
 				uint8_t cmd_res[2] = { 0x01, 0x10 };
 				uint8_t res_buf[4];
 				if (i2c_reg_read(0x48, cmd_res, 2, res_buf, 4)) {
@@ -668,7 +661,7 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 					if (rx > 0 && rx < 65535) max_x = rx;
 					if (ry > 0 && ry < 65535) max_y = ry;
 				}
-				printf("melfas: detected Melfas MSS100 at 0x48 (active touch mode, %ux%u)\n", max_x + 1, max_y + 1);
+				printf("melfas: detected Melfas MSS100 at 0x48 (resolution %ux%u)\n", max_x + 1, max_y + 1);
 			} else {
 				printf("fts: no answer at 0x49 or 0x48 on i2c6 (gpio%u/gpio%u)\n", PIN_SCL, PIN_SDA);
 				thread_terminate(current_thread());
@@ -732,8 +725,8 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 								const uint8_t *p = &ev_buf[i * 16];
 								uint32_t action = (p[0] >> 6) & 3;
 								uint32_t raw_id = (p[0] >> 2) & 0xf;
-								if (raw_id >= 1 && raw_id <= 10 && action != 0) {
-									uint32_t id = raw_id - 1;
+								if (action != 0) {
+									uint32_t id = (raw_id >= 1 && raw_id <= 10) ? (raw_id - 1) : (raw_id < FTS_MAX_FINGERS ? raw_id : 0);
 									uint32_t x = ((uint32_t)p[1] << 4) | (p[3] >> 4);
 									uint32_t y = ((uint32_t)p[2] << 4) | (p[3] & 0xf);
 
@@ -761,6 +754,9 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 									}
 									events++;
 									got++;
+									if (touches <= 50 || (touches % 100) == 0) {
+										printf("melfas touch: id=%u act=%u (%u,%u) -> (%u,%u)\n", id, action, x, y, sx, sy);
+									}
 								}
 							}
 						}
