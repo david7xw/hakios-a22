@@ -39,9 +39,28 @@ static const uint8_t touch_fw[TOUCH_FW_SIZE] = { 0x00 };
 EOF
 	fi
 fi
-[ -f "$HERE/font8x16.h" ] || swift "$HERE/../tools/mkfont8x16.swift" > "$HERE/font8x16.h"
+[ -f "$HERE/font8x16.h" ] || python3 "$ROOT/tools/mkfont8x16.py" > "$HERE/font8x16.h"
+if [ ! -f "$ROOT/xnuloader/identity.h" ]; then
+    mkdir -p "$ROOT/xnuloader"
+    python3 "$ROOT/tools/mkidentity.py" --placeholder > "$ROOT/xnuloader/identity.h"
+fi
 
-clang $CFLAGS "$@" -c "$HERE/start.S" -o "$HERE/start.o"
-clang $CFLAGS "$@" -c "$HERE/mtkloader.c" -o "$HERE/mtkloader.o"
-$LLD -T "$HERE/link.ld" --oformat binary "$HERE/start.o" "$HERE/mtkloader.o" -o "$HERE/mtkloader.bin"
+if command -v clang >/dev/null 2>&1 && (command -v ld.lld >/dev/null 2>&1 || command -v zig >/dev/null 2>&1); then
+    CC="${CC:-clang}"
+    LLD="${LLD:-ld.lld}"
+    command -v "$LLD" >/dev/null 2>&1 || LLD="zig ld.lld"
+    $CC $CFLAGS "$@" -c "$HERE/start.S" -o "$HERE/start.o"
+    $CC $CFLAGS "$@" -c "$HERE/mtkloader.c" -o "$HERE/mtkloader.o"
+    $LLD -T "$HERE/link.ld" --oformat binary "$HERE/start.o" "$HERE/mtkloader.o" -o "$HERE/mtkloader.bin"
+else
+    CC="${CC:-aarch64-linux-gnu-gcc}"
+    LD="${LD:-aarch64-linux-gnu-ld}"
+    OBJCOPY="${OBJCOPY:-aarch64-linux-gnu-objcopy}"
+    CFLAGS="-ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mgeneral-regs-only -mstrict-align -Os -Wall -Wextra"
+    $CC $CFLAGS "$@" -c "$HERE/start.S" -o "$HERE/start.o"
+    $CC $CFLAGS "$@" -c "$HERE/mtkloader.c" -o "$HERE/mtkloader.o"
+    $LD -T "$HERE/link.ld" "$HERE/start.o" "$HERE/mtkloader.o" -o "$HERE/mtkloader.elf"
+    $OBJCOPY -O binary "$HERE/mtkloader.elf" "$HERE/mtkloader.bin"
+    rm -f "$HERE/mtkloader.elf"
+fi
 ls -la "$HERE/mtkloader.bin"

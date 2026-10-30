@@ -45,8 +45,9 @@ entry_relocate:
 
     /* Put the copy loop where the copy cannot overwrite it. */
     adr     x0, reloc_stub
+    adr     x2, reloc_stub_end
+    sub     x2, x2, x0
     ldr     x1, =RELOC_STUB_PA
-    ldr     x2, =reloc_stub_end - reloc_stub
 1:  ldr     x6, [x0], #8
     str     x6, [x1], #8
     subs    x2, x2, #8
