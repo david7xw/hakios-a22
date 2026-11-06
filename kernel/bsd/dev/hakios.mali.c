@@ -76,6 +76,31 @@ static uint32_t kept_next;
 static LCK_GRP_DECLARE(kept_lock_group, "redwood-said");
 static LCK_MTX_DECLARE(kept_lock, &kept_lock_group);
 
+/*
+ * What the processor wrote, visible to the GPU: the cache lines over `size` bytes at `start`
+ * are cleaned to the point of coherency and a barrier follows. A Metal buffer is written by
+ * the program through a mapping with no cache of the GPU's between it and memory, but on this
+ * processor that mapping can be cached: clearFragment20's constant buffer reached the shader
+ * as zeros until its 256 bytes were cleaned here (test62). NULL: the barrier alone.
+ */
+void redwood_mali_to_memory(const void *start, uint64_t size);
+void
+redwood_mali_to_memory(const void *start, uint64_t size)
+{
+	uint64_t at, end;
+
+	if (start == NULL) {
+		__asm__ volatile ("dsb sy" ::: "memory");
+		return;
+	}
+	at = (uint64_t)(uintptr_t)start & ~63ull;
+	end = (uint64_t)(uintptr_t)start + size;
+	for (; at < end; at += 64) {
+		__asm__ volatile ("dc civac, %0" :: "r"(at) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
 /* A line from the kernel itself, kept and said again every minute as kern.redwood.say's "!" ones are. */
 void redwood_keep(const char *format, ...) __printflike(1, 2);
 void
@@ -722,6 +747,18 @@ redwood_mali_parameter(uint32_t which, uint64_t *value)
 	case 40:                                /* AFBC_FEATURES: not on this GPU */
 		*value = 0;
 		return true;
+	case 41:                                /* SYSTEM_TIMESTAMP: the GPU's own counter */
+		*value = rd(mali, 0x098) | ((uint64_t) rd(mali, 0x09c) << 32);
+		return true;
+	case 42:                                /* SYSTEM_TIMESTAMP_FREQUENCY: the SoC's counter, 26 MHz */
+		*value = 26000000;
+		return true;
+	case 43:                                /* ALLOWED_JM_CTX_PRIORITIES: medium */
+		*value = 1u << 1;
+		return true;
+	case 44:                                /* SELECTED_COHERENCY: none */
+		*value = 31;
+		return true;
 	default:
 		if (which >= 22 && which <= 37) {
 			*value = rd(mali, 0x0c0 + (which - 22) * 4);
@@ -1015,6 +1052,27 @@ redwood_mali_wait(uint64_t seq, uint64_t timeout_ns)
 	done = mali_done_seq >= seq;
 	lck_mtx_unlock(&mali_queue_lock);
 	return done;
+}
+
+/* Whether job `seq` is done, a look and no waiting; and the last number given out. For the
+ * service's syncobj waits, which hold fences and have to poll them. */
+bool redwood_mali_done(uint64_t seq);
+bool
+redwood_mali_done(uint64_t seq)
+{
+	bool done;
+
+	lck_mtx_lock(&mali_queue_lock);
+	done = seq == 0 || mali_done_seq >= seq;
+	lck_mtx_unlock(&mali_queue_lock);
+	return done;
+}
+
+uint64_t redwood_mali_last(void);
+uint64_t
+redwood_mali_last(void)
+{
+	return mali_queued_seq;
 }
 
 static void

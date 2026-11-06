@@ -1,4 +1,4 @@
-# The Mali-G52 on the A32: hardware brought up, software not yet
+# The Mali-G52 on the A22: hardware and the panfrost service
 
 The GPU is a **Mali-G52 MC2** (Bifrost), the same block as the Infinix Hot 20's (MT6768). It
 needs no firmware; bringing it up is power, clocks and a reset, in MediaTek's order. The
@@ -20,7 +20,7 @@ driver is `kernel/bsd/dev/hakios.mali.c`, ported from the Infinix's `redwood_mal
 5. one small job (write a word) through address space 0 in identity mode, read back;
 6. the same job again through the GPU's own page tables.
 
-Boot-arg `mali=1`. The A32's run reached all six:
+Boot-arg `mali=1`. The A22's run reached all six:
 
 ```
 mali: GPU_ID 0x74021000 (Mali-G52 r1p0), shader cores 0x3, tiler 0x1, L2 0x1: all powered
@@ -33,15 +33,23 @@ mali: came up to step 6 of 6
 
 ## What acceleration needs
 
-CoreAnimation still draws in software because the layer above the hardware is not here:
+The three layers are now in this tree:
 
-- **panfrost IOKit service** — the Infinix's `RedwoodMali.cpp` implements Linux's panfrost
-  DRM interface for programs; it is available in the Infinix device repository, not in the
-  public common one;
-- **Mesa panfrost + a DRM shim** — `tools/mesa/hakios-drm` in the public tree speaks Adreno's
-  msm interface only;
-- **Metal for Mali** — the public `hakios-metal` driver is Adreno/PM4; the Infinix's
-  AIR→NIR→panfrost Metal driver is not published.
+- **panfrost IOKit service** — `kernel/iokit/Kernel/hakios.mali.cpp` speaks Linux's panfrost
+  DRM interface (parameters, buffers, GPU addresses, job chains, waits, syncobjs) to the
+  `RedwoodMali` service.
+- **Mesa panfrost + a DRM shim** — `tools/mesa/hakios-drm` opens `RedwoodMali` when Mesa asks
+  for `panfrost` and passes the DRM requests through as user-client calls. The Mesa patches in
+  `tools/mesa/` add the Darwin mmap/BO handling; `tools/mk-mesa.sh` now builds
+  `softpipe,panfrost` by default.
+- **Metal for Mali** — still not public. The public `hakios-metal` driver is Adreno/PM4; the
+  Infinix's AIR→NIR→panfrost Metal runtime (`libredwoodair`, `RedwoodMetal.bundle`) is not
+  published. `tools/mesa/air/air-integer-ubo.patch` is kept only as the patch for that private
+  `air_metal.c`; `mk-mesa.sh` does not apply it.
+
+So the remaining GPU work is not the kernel service any more: it is fixing the panfrost
+blit/readback stalls seen on the A32 (the same Mali-G52) and, for Metal, obtaining the private
+Mali Metal runtime. The GL path is the realistic one for CoreAnimation.
 
 ## The panfrost service (test45)
 
@@ -58,11 +66,11 @@ mali: came up to step 6 of 6
 RedwoodMali: the GPU is there for programs to draw with
 ```
 
-So the path program → IOKit service → Mali is in place. What is still missing for
-CoreAnimation acceleration is the client side: Mesa's panfrost needs a DRM shim
-(`libdrm`-like) that talks to this service, and the public `hakios-metal` driver is
-Adreno/PM4, not Mali. The realistic path remains Mesa panfrost plus CoreAnimation's
-OpenGL ES backend (the Infinix's `camtl=0` fallback).
+So the path program → IOKit service → Mali is in place, and the client side is in
+`tools/mesa/hakios-drm`: Mesa's panfrost opens the service as if it were `/dev/dri/renderD128`.
+Build with `DRIVERS=softpipe,panfrost` (the default) and boot with `mali=1` (and `gl=1` for the
+window server). If the GPU is absent or `OSMESA_SOFTWARE=1` is set, the same library falls back
+to softpipe. Metal is still the private Mali runtime described above.
 
 ## The user-space test
 
