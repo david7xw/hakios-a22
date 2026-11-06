@@ -33,6 +33,23 @@ frame is still going out. The working arrangement:
 The DSI busy check was the piece that made the whole home screen appear; without it the
 second frame was written over the first one's transfer and the panel stayed on the logo.
 
+## The kernel-side kick (`mtk_kick=1`, `te_sync=1`)
+
+The A22 still uses the loader's watcher (`mtk_kick=0`). The presenter also has the A32's
+kernel-side path now, for when the watcher is turned off:
+
+- `mtk_panel_idle(50)` waits for `0x1401400c` bit 31 to clear before composition and again in
+  `mtk_panel_kick()`, so the previous frame is out of the DSI before the framebuffer is drawn
+  over.
+- `te_sync=1` polls the panel's TE signal on GPIO44 and starts the transfer on an edge, with a
+  one-time fallback if no edge is seen. It is off by default: the A32 measured two edges per
+  frame and a timeout that cost frames, so it is opt-in.
+- each queued swap remembers the GPU job its surfaces stood for, and `show()` waits for that
+  job, not for the surface's live sequence. A later read-only job on the same surface (a blur
+  behind a sheet) no longer makes the frame wait.
+
+None of these have been measured on the A22 yet; with `mtk_kick=0` they do nothing.
+
 ## Result
 
 `a22diag` proved the display pipeline: color bars and countdown showed crisply at 720×1600.
