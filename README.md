@@ -17,11 +17,11 @@ the end of `userdata`) and the kernel reads it off the eMMC as it needs it.
 | --- | --- | --- |
 | boot | works | `mtkloader/`: MMU off, eMMC through MSDC0, device tree and boot arguments for XNU; 4 cores |
 | storage | works, read only | the system image read off the eMMC as needed (`emmc_root=1`): 4 GiB `xnusys`, ~2.5 GB of iOS |
-| display | works | 720×1600 command-mode DSI, iOS at scale 2; the loader's watcher kicks the panel and checks DSI busy (`kernel/iokit/Kernel/MiniIOMobileFramebuffer.cpp`, `mtk_kick=0`) |
-| touch | works | STM FTS5CU56A or Melfas MSS100 on I2C6 at 0x49/0x48, bit-banged on GPIO89/90 (`kernel/bsd/dev/hakios.fts.c`); VCAMA2 rail switched on from the kernel |
+| display | works | 720×1600 command-mode DSI, iOS at scale 2; the loader's watcher kicks the panel (`mtk_kick=0`), or with `mtk_kick=1` the presenter does it and waits for DSI idle (`kernel/iokit/Kernel/MiniIOMobileFramebuffer.cpp`) |
+| touch | partial | STM FTS5CU56A or Melfas MSS100 on I2C6 at 0x49/0x48, bit-banged on GPIO89/90 (`kernel/bsd/dev/hakios.fts.c`); the rails are power-cycled and both controllers are initialised (Melfas: normal touch mode + interrupt trigger, 1-based ids), needs a run to confirm on the phone (`docs/touch-a22.md`) |
 | buttons | works | power and volume up/down (`kernel/bsd/dev/hakios.mtkkeys.c`) |
-| GPU | partial | Mali-G52 r1p0 brought up (step 6/6), the panfrost service `RedwoodMali` running, a user-space job through it (`0xc0ffee01`), and Mesa panfrost built and drawing (2 job chains); its blit/readback stalls, so CoreAnimation still draws in software (`docs/gpu-a32.md`) |
-| CPU | works | 4 cores; A75 at 1999 MHz and A55 at 1699 MHz with `mtk_cpufreq=3` (`kernel/bsd/dev/hakios.mtkcpufreq.c`); a ten-minute run stayed there (`docs/stability-a32.md`) |
+| GPU | partial | Mali-G52 r1p0 brought up (step 6/6), the panfrost service `RedwoodMali` running with the syncobj/`submit_ex`/cache-clean interface, Mesa panfrost + the `hakios-drm` shim building by default; the A32's blit/readback stall is still open, so CoreAnimation may stay in software (`docs/gpu-a22.md`) |
+| CPU | works | 4 cores; A75 at 1999 MHz and A55 at 1699 MHz with `mtk_cpufreq=3` (`kernel/bsd/dev/hakios.mtkcpufreq.c`); a ten-minute run stayed there (`docs/stability-a22.md`) |
 | battery | works | MT6358 `BATADC` (voltage, 3:1 divider) and `CHRDET`, `battery=2`; temperature and current are still placeholders |
 | sensors | partial | the SCP sensor hub runs and the accelerometer streams (`scp_step=6`, `kernel/bsd/dev/hakios.scp.c`); turning the samples into screen rotation is still user-space work |
 | Wi-Fi / Bluetooth, audio, camera, cellular | missing | |
@@ -38,11 +38,14 @@ mali: second job, through the GPU's page tables ... -- the GPU ran it
 mali: came up to step 6 of 6
 ```
 
-The GPU itself works. What is missing for acceleration is the layer above: the panfrost IOKit
-service, a panfrost DRM shim for Mesa, and (for Metal) a Mali Metal driver. The public
-`hakios-xnu-kernel` and `hakios-metal` repositories only carry the Adreno/msm side; the
-Infinix's Mali panfrost/Metal work is not published. Leaving `mali=1` on changes nothing
-else: the GPU stays powered and tested.
+The GPU itself works. The panfrost service in `kernel/iokit/Kernel/hakios.mali.cpp` is now
+the A32 tree's current one (syncobjs, `submit_ex`, cache cleaning, the newer GET_PARAMs), and
+`tools/mesa/hakios-drm` speaks panfrost as well as msm, so Mesa built with
+`DRIVERS=softpipe,panfrost` reaches `RedwoodMali`. What is still open is the A32's
+blit/readback stall, not the interface: see `docs/gpu-a22.md`. Metal is separate: the public
+`hakios-metal` is Adreno/PM4, and the Mali Metal runtime (`libredwoodair`,
+`RedwoodMetal.bundle`) is private, so Metal cannot be built from this tree. Leaving `mali=1`
+on changes nothing else: the GPU stays powered and tested.
 
 ## What is here
 
@@ -51,7 +54,7 @@ else: the GPU stays powered and tested.
   tree and boot arguments, and brings Android back with XNU's log in `pstore`.
 - `kernel/` — this phone's drivers and changes in XNU (APSL 2.0, see `kernel/README.md`).
 - `tools/` — `chainboot.py` (pack a bare-metal program in front of Android's kernel) and
-  `mktouchfw.py` (kept for the project's other phones; the A32's touch needs no firmware).
+  `mktouchfw.py` (kept for the project's other phones; the A22's touch controller keeps its firmware in its own flash).
 - `diag/` — `a22diag`, the first program that proved the chainboot and the framebuffer on
   this phone.
 - `docs/` — how the display, the touch screen, the buttons and the GPU were found, register
@@ -64,6 +67,10 @@ No file of iOS, no firmware of the phone, no boot/partition image, no screenshot
 `xnuloader/identity.h` (made from your own IPSW), no log with a device's data. `LEGAL.md`
 says it in full. Build outputs (`*.o`, `*.bin`, `*.img`, generated headers) are ignored by
 `.gitignore`.
+
+If the generated iOS files were deleted, they are rebuilt, not recovered: `sysimage/` and
+`xnu-deps/` come from the public common tree and the Apple files come from the IPSW. The exact
+steps, file, size and checks are in [`docs/restore-ios-a22.md`](docs/restore-ios-a22.md).
 
 ## Running
 
@@ -85,8 +92,12 @@ python3 tools/chainboot.py stock-boot.img mtkloader.bin boot-a22.img xnu-payload
 One run, with the A22 pieces enabled:
 
 ```
-cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1
+cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1 mtk_cpufreq=3 battery=2
 ```
+
+`gl=1` additionally lets the window server use the Mesa/panfrost OpenGL ES library (the
+library is only built with `GL=1` in `userland/build.sh`). `metal=1`/`metal_plugin=1` only make
+sense with a Mali Metal runtime, which this tree does not carry.
 
 `boot` boots Android by default. To ask for one XNU run, from Android:
 

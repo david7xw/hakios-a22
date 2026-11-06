@@ -1,4 +1,4 @@
-# Buttons on the A32: one in the keypad, two in the PMIC
+# Buttons on the A22: one in the keypad, two in the PMIC
 
 The three buttons are not all on the same controller, and the device tree says why.
 
@@ -8,7 +8,7 @@ The three buttons are not all on the same controller, and the device tree says w
 | volume down | MT6358 PMIC **homekey** | `TOPSTATUS` (`0x28`) bit 3, clear while down |
 | power | MT6358 PMIC pwrkey | `TOPSTATUS` bit 1, clear while down |
 
-The keypad map in the A32's device tree has only index 1 filled (`0x73`). Volume down is the
+The keypad map in the A22's device tree has only index 1 filled (`0x73`). Volume down is the
 PMIC's homekey: Android's keypad driver reports the homekey interrupt as `KEY_VOLUMEDOWN`
 (`kpd-sw-rstkey` `0x72` in `mediatek,kp`, see `mt6358/v1/pmic_irq.c` and
 `hal_kpd.c`'s `kpd_pmic_rstkey_hal`). Power was already known from the Infinix port.

@@ -5,7 +5,7 @@ laid out, and the rules that are not obvious from the code. Read it before chang
 
 ## What this is
 
-HakiOS for the **Samsung Galaxy A32 4G (SM-A325F)**: MediaTek Helio G80 (MT6769T), Mali-G52
+HakiOS for the **Samsung Galaxy A22 4G (SM-A225F)**: MediaTek Helio G80 (MT6769V), Mali-G52
 MC2, eMMC. Apple's open XNU kernel (xnu-8796.121.2) and iOS 16.5's unmodified user space,
 started by this phone's own loader. This is the device repository; the shared kernel, user
 space and GPU stack live in the organisation's common repositories (`hakios-xnu-kernel`,
@@ -32,8 +32,9 @@ asks the loader for one XNU boot. The loader relocates itself and XNU to `0x4008
 loads the image at a random address), brings up what XNU cannot (display kick, PMIC, clocks),
 builds XNU's device tree and boot arguments, and starts the kernel. The kernel's root is the
 iOS system image in the `xnusys` partition, read off the eMMC as needed (`emmc_root=1`). A
-run ends after the loader's watchdog (300 s here), which returns the phone to Android, or
-earlier when five fingers are held on the screen.
+run ends when five fingers are held on the screen, when the watcher's optional
+`XNU_WATCH_SECONDS`/`XNU_WDT_SECONDS` fire, or by hand; by default the loader leaves both off
+and the watcher keeps kicking the panel.
 
 Every hardware step is behind a boot-arg and does nothing without it (`touchscreen=3`,
 `buttons=2`, `mali=1`). New hardware work follows the same pattern: numbered steps, reading
@@ -57,16 +58,18 @@ only first, each step's result said in the log.
 
 ## Working on the phone: safety
 
-- Flash **only `boot`**. The A32 is a **legacy non-A/B** device: the boot partition is
+- Flash **only `boot`**. The A22 is a **legacy non-A/B** device: the boot partition is
   `boot` (not `boot_a`), and there is no slot B (`boot_b`, `system_b`, ... do not exist).
   Write only `boot`, and `xnusys` only when the system image changes.
 - Always pass the serial (`adb -s`, `fastboot -s`); a second phone may be connected.
 - Keep the user's stock `boot` image; it is how the phone is restored. Magisk is not
   needed after the first setup: the chainboot image is flashed over `boot`.
-- Runs are short (200–600 s) and one at a time. Do not raise CPU or GPU voltages.
+- Runs are one at a time. Do not raise CPU or GPU voltages.
 - The eMMC driver is read only by construction; keep it so unless the owner asks otherwise.
 - The touch screen's two rails are GPIO4 (1.8 V I/O) and PMIC VCAMA2 (3.0 V analog). The
-  chip answers on I2C with only GPIO4 on but reports no fingers; both are needed.
+  chip answers on I2C with only GPIO4 on but reports no fingers; both are needed. There is no
+  reset GPIO: the driver power-cycles both rails, then initialises either the STM or the
+  Melfas (see `docs/touch-a22.md`).
 
 ## Building and running
 
@@ -75,22 +78,21 @@ What it needs:
   from the user's own IPSW;
 - clang, plus the zig `ld.lld` that the common tree provides;
 - `adb` and `fastboot`;
-- an SM-A325F with an unlocked bootloader and its stock `boot` saved.
+- an SM-A225F with an unlocked bootloader and its stock `boot` saved.
 
 ```sh
 export HAKIOS_SERIAL=...      # adb devices
 # from the common tree, with this repository's pieces applied:
-python3 tools/chainboot.py stock-boot.img mtkloader.bin boot-a32.img xnu-payload.bin
+python3 tools/chainboot.py stock-boot.img mtkloader.bin boot-a22.img xnu-payload.bin
 ```
 
 Boot arguments used for the working image:
 
 ```
-cpus=4 fbscale=3 touchscreen=3 buttons=2 mali=1
+cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1 mtk_cpufreq=3 battery=2
 ```
 
-Four cores are stable; six were tried and ended in fastboot. XNU is given the 1.73 GiB run
-between `0xd1600000` and `0x13ffefff`.
+Four cores are stable. XNU is given the 1.73 GiB run between `0xd1600000` and `0x13ffefff`.
 
 ## Reading a run's log
 

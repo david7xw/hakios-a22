@@ -1,4 +1,4 @@
-# Battery on the A32: the MT6358's own ADC
+# Battery on the A22: the MT6358's own ADC
 
 The phone's battery is measured by the PMIC, an **MT6358**, on **AUXADC channel 0 (BATADC)**.
 There is no fuel gauge in this driver yet: the percentage is interpolated from the voltage.

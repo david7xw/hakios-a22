@@ -1,6 +1,6 @@
-# The A32's two CPU clusters
+# The A22's two CPU clusters
 
-The Galaxy A32 4G's MT6769T has two Cortex-A75 cores and six Cortex-A55 cores, clocked by
+The Galaxy A22 4G's MT6769V has two Cortex-A75 cores and six Cortex-A55 cores, clocked by
 MediaTek's ARMPLL2 and ARMPLL1 and fed by the MT6358's Vproc11 and Vproc12 bucks. The boot
 loader (LK) leaves both clusters at about 1175 MHz and 0.8 V; Android's driver then takes them
 to 2000 MHz (A75) and 1700 MHz (A55).
@@ -40,7 +40,7 @@ kept about 100 mV above Vproc (`step + 16`, capped at 99).
 
 The A75s go first: the window server and SpringBoard run there.
 
-## What the A32's boot loader leaves (measured)
+## What the A22's boot loader leaves (measured)
 
 ```
 cpufreq: A75s at 1175 MHz (CON1 0x1169d89), Vproc step 48 (800 mV), VSRAM step 64 (900 mV)

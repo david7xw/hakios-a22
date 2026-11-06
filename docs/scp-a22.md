@@ -1,6 +1,6 @@
-# The SCP sensor hub on the A32
+# The SCP sensor hub on the A22
 
-The Galaxy A32 has the same MediaTek "tinysys" Cortex-M co-processor as the Infinix Hot 20:
+The Galaxy A22 has the same MediaTek "tinysys" Cortex-M co-processor as the Infinix Hot 20:
 `scp@10500000`, 512 KB of TCM, its configuration block at `0x105c0000`, clock control at
 `0x105c4000`, and its own DRAM in the `SCP-reserved` region (`0x9f900000`, 6 MB). The
 accelerometer, gyroscope, light and proximity sensors are behind it; the application processor
