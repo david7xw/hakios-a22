@@ -139,6 +139,28 @@ static inline void plog_putc(char c)
 	PLOG_HDR->size = size;
 }
 
+/* Is `needle` somewhere in the ring? Used to keep an XNU log across the reset into Android:
+ * the next loader run would otherwise plog_reset() it away before Android can read pstore. */
+static inline int plog_contains(const char *needle, uint32_t n)
+{
+	uint32_t start = PLOG_HDR->start, size = PLOG_HDR->size;
+
+	if (PLOG_HDR->sig != RAMOOPS_SIG || size > PLOG_CAP || n == 0 || n > size) {
+		return 0;
+	}
+	uint32_t first = (start + PLOG_CAP - size) % PLOG_CAP;
+	for (uint32_t i = 0; i + n <= size; i++) {
+		uint32_t k = 0;
+		while (k < n && PLOG_DATA[(first + i + k) % PLOG_CAP] == needle[k]) {
+			k++;
+		}
+		if (k == n) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* ---- framebuffer text ---- */
 
 struct fbcon {

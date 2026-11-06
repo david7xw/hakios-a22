@@ -26,6 +26,7 @@ append_once() {
 	grep -qxF "$line" "$file" || printf '%s\n' "$line" >> "$file"
 }
 for line in \
+	'bsd/dev/redwood_emmc.c                   standard' \
 	'bsd/dev/hakios.fts.c                     standard' \
 	'bsd/dev/hakios.mali.c                    standard' \
 	'bsd/dev/hakios.mtkbattery.c              standard' \

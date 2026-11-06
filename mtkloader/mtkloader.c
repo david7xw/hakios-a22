@@ -124,6 +124,11 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #ifndef XNU_EXTRA_ARGS
 #define XNU_EXTRA_ARGS      "cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1 mtk_cpufreq=3 battery=2"
 #endif
+/* 1: after an early XNU return, chain straight into Android instead of resetting through LK.
+ * LK clears the pstore console zone, so a reset loses the XNU log before Android can read it. */
+#ifndef XNU_CHAIN_ANDROID
+#define XNU_CHAIN_ANDROID   0
+#endif
 /*
  * 1: the system image stays on the eMMC and the kernel reads it as it needs it (emmc_root=1,
  * bsd/dev/redwood_emmc.c), the default; 0: it is read into DRAM here as md0 -- 2.4 GB of the kernel's 4 GB,
@@ -1553,7 +1558,12 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 	display_dump();
 	show_log_tail(40);
 	dbg_delay_ms(20000);
+#if XNU_CHAIN_ANDROID
+	/* Keep the ramoops console intact: Android's pstore reader can then show the XNU log. */
+	chain_android();
+#else
 	reset_board();
+#endif
 }
 
 /*
@@ -3494,7 +3504,13 @@ void mtkloader_main(uint64_t dtb)
 		chain_android();
 	}
 
-	plog_reset();
+	if (plog_contains("=== XNU", 7)) {
+		/* The previous boot was XNU and its log is still in the ramoops console. Keep it for
+		 * Android's pstore reader instead of wiping it before this boot's own messages. */
+		out("== mtkloader: keeping the previous XNU log ==\n");
+	} else {
+		plog_reset();
+	}
 	out("== mtkloader A22 v1: relocated and running ==\n");
 	display_dump();
 #if TOUCH_PROBE
