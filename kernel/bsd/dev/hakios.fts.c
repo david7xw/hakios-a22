@@ -1,18 +1,22 @@
 /*
- * The touch screen of the Samsung Galaxy A32 4G (SM-A325F): an STM FTS5CU56A on I2C6 at
- * address 0x49, as a source of touches for /dev/hakios-touch (sys/hakios.input.h). Only with
- * boot-arg touchscreen=3: every address below belongs to this phone.
+ * The touch screen of the Samsung Galaxy A22 4G (SM-A225F): either an STM FTS5CU56A on I2C6
+ * at address 0x49 or a Melfas MSS100 at 0x48, as a source of touches for /dev/hakios-touch
+ * (sys/hakios.input.h). Only with boot-arg touchscreen=3: every address below belongs to
+ * this phone. The A22 on this bench has the Melfas; the STM path is kept for the other panel.
  *
  * There is no I2C framework in this kernel, and the MediaTek I2C6 controller is not needed:
  * the two bus pins are driven by hand, open drain, with the controller's internal pull-ups
  * on (the board's own may be there too). SCL is GPIO89, SDA GPIO90, both at function 0 in
  * GPIO_MODE11 (0x3b0); their pull registers are in the iocfg_0 block at 0x10002000 (PU at
- * +0x60 bits 23 and 25, PD at +0x50). The chip is at 0x49: write address 0x92, read 0x93.
+ * +0x60 bits 23 and 25, PD at +0x50). The STM is at 0x49: write address 0x92, read 0x93; the
+ * Melfas is at 0x48: write 0x90, read 0x91.
  *
- * The controller keeps its firmware in its own flash; Linux's driver reads the version and
- * only updates it when the file is newer (drivers/input/sec_input/stm/stm_fw.c), so by the
- * time this runs the chip is already up and answering. What it answers with are 16-byte
- * events, one per read of 0x60 (READ_ONE_EVENT; 0x61 reads all of them, 0x62 clears):
+ * The STM keeps its firmware in its own flash; Linux's driver reads the version and only
+ * updates it when the file is newer (drivers/input/sec_input/stm/stm_fw.c), so by the time
+ * this runs the chip is already up and answering. The Melfas may keep its firmware in RAM,
+ * which is why the power path below only cycles the I/O rail as a fallback. What the STM
+ * answers with are 16-byte events, one per read of 0x60 (READ_ONE_EVENT; 0x61 reads all of
+ * them, 0x62 clears):
  *
  *   byte 0   bits 1:0 event id (0 coordinate, 1 status, 2 gesture, 3 vendor)
  *            bits 5:2 finger (0..9)
@@ -66,6 +70,8 @@ extern void hakios_tl(const char *format, ...) __printflike(1, 2);
 #define PIN_SCL         89
 #define PIN_SDA         90
 #define PIN_TSP_EN      4               /* high: the touch screen's 1.8 V I/O rail (fixed_regulator0 / tsp_en_1p8_ldo) */
+#define PIN_TSP_IRQ     10              /* the controller's interrupt line; Linux leaves it an input */
+#define PIN_TSP_ICID    28              /* the panel's controller strap; Linux leaves it an input */
 
 #define PIN_BANK(pin)   ((pin) / 32)
 #define PIN_BIT(pin)    (1u << ((pin) % 32))
@@ -175,6 +181,25 @@ pin_value(unsigned pin)
 	return (rd(gpio, DIN(PIN_BANK(pin))) & PIN_BIT(pin)) != 0;
 }
 
+/*
+ * Make a pin an ordinary input at function 0. The touch controller's interrupt line and the
+ * panel's controller strap are inputs on Linux, and the loader can leave them as outputs;
+ * driving either one during power-on is not something the controller's datasheet allows.
+ * The pull settings are deliberately left alone: the board's pinctrl already has them right.
+ */
+static inline void
+pin_input(unsigned pin)
+{
+	uint32_t bit = PIN_BIT(pin);
+	uint32_t mode;
+
+	wr(gpio, DOUT_SET(PIN_BANK(pin)), bit);
+	wr(gpio, DIR_CLR(PIN_BANK(pin)), bit);
+	mode = rd(gpio, MODE_REG(pin));
+	mode &= ~(0xfu << ((pin % 8) * 4));
+	wr(gpio, MODE_REG(pin), mode);
+}
+
 /* ---- the PMIC wrapper, for VCAMA2 --------------------------------------------------------- */
 
 static bool
@@ -219,14 +244,17 @@ pmic_write(uint32_t reg, uint32_t value)
  * With only GPIO4 on the chip answers on I2C but nothing reaches the analog front end, so no
  * finger is ever seen.
  *
- * Both are also the only reset the controller has (the device tree gives the Melfas and the STM
- * no reset GPIO). Android leaves the chip powered and in its low-power/AOT mode; switching the
- * rails off and on again is what returns it to its power-on state, and the STM needs it as much
- * as the Melfas. The order is Samsung's (sec_input_power): analog off, 4 ms, I/O off; on, I/O
- * first, 1 ms, analog. Then the chip's own power-on delay.
+ * The Melfas is the controller this phone actually has (the ICID strap selects one of two
+ * possible panels). Android leaves its I/O rail on and switches only VCAMA2 for screen
+ * off/on, and the chip keeps answering. Pulling the I/O rail low as well is a full power-on
+ * reset: if the MSS100 keeps its firmware in RAM that reset leaves it blank, and a blank
+ * Melfas does not answer at 0x48 at all. So the first attempt only enables VCAMA2, exactly
+ * like Android's resume path. If that fails (an STM in Android's AOT mode may need a real
+ * reset) the caller may ask for the full cycle, with the rails held down long enough to
+ * discharge; the STM keeps its firmware in flash, so that is safe for it.
  */
 static void
-touch_power_on(void)
+touch_power_on(bool cycle)
 {
 	uint32_t con0 = 0, ana = 0, op = 0;
 
@@ -238,22 +266,28 @@ touch_power_on(void)
 		printf("fts: the pmic did not answer; vcama2 may be off\n");
 		return;
 	}
-	printf("fts: vcama2 before: con0 %04x ana %04x\n", con0, ana);
+	printf("fts: vcama2 before: con0 %04x ana %04x (cycle %u)\n", con0, ana, cycle ? 1 : 0);
 
-	/* Both rails down: the controller's power-on reset. */
-	(void)pmic_write(MT6358_VCAMA2_CON0, con0 & ~1u);
-	sleep_us(4000);
-	wr(gpio, DOUT_CLR(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
-	sleep_us(20000);
+	if (cycle) {
+		/* Both rails down, long enough for the board's capacitors to discharge. */
+		(void)pmic_write(MT6358_VCAMA2_CON0, con0 & ~1u);
+		sleep_us(50000);
+		wr(gpio, DOUT_CLR(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
+		sleep_us(100000);
 
-	/* Both up again, I/O first, then the 3.0 V the device tree asks for. */
-	wr(gpio, DOUT_SET(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
-	sleep_us(1000);
+		/* Both up again, I/O first, then the 3.0 V the device tree asks for. */
+		wr(gpio, DOUT_SET(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
+		sleep_us(10000);
+	} else {
+		/* Android keeps the I/O rail on; just make sure it is, and switch VCAMA2. */
+		wr(gpio, DOUT_SET(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
+	}
+
 	(void)pmic_write(MT6358_VCAMA2_ANA_CON0, (ana & ~0xf00u) | ((uint32_t)VCAMA2_VOSEL_3000MV << 8));
 	(void)pmic_read(MT6358_VCAMA2_OP_EN, &op);
 	(void)pmic_write(MT6358_VCAMA2_OP_EN, op | 1u);
 	(void)pmic_write(MT6358_VCAMA2_CON0, con0 | 1u);
-	sleep_us(100000);
+	sleep_us(250000);
 
 	con0 = ana = 0;
 	(void)pmic_read(MT6358_VCAMA2_CON0, &con0);
@@ -287,6 +321,15 @@ pins_to_gpio(void)
 	pu |= (1u << IOCFG_BIT_SCL) | (1u << IOCFG_BIT_SDA);
 	wr(iocfg, IOCFG_PU, pu);
 
+	/*
+	 * Linux's Melfas pinctrl state makes the interrupt line an input before power-on, and
+	 * the ICID strap is an input too. Do the same before the rails come up: the loader or
+	 * Android may have left either one driven, and the controller samples the strap as it
+	 * leaves reset.
+	 */
+	pin_input(PIN_TSP_IRQ);
+	pin_input(PIN_TSP_ICID);
+
 	__asm__ volatile ("dsb sy");
 	pin_release(PIN_SCL);
 	pin_release(PIN_SDA);
@@ -301,11 +344,29 @@ i2c_half(void)
 	sleep_us(4);
 }
 
+/*
+ * The controller may hold SCL low after we let go (clock stretching), for instance while it
+ * fetches a register. Do not start timing the high phase until the line is actually high.
+ * A short timeout keeps a stuck bus from hanging the boot thread forever.
+ */
+static bool
+i2c_scl_high(void)
+{
+	for (unsigned spin = 0; spin < 2000; spin++) {
+		if (pin_value(PIN_SCL)) {
+			return true;
+		}
+		sleep_us(1);
+	}
+	return false;
+}
+
 static void
 i2c_start(void)
 {
 	pin_release(PIN_SDA);
 	pin_release(PIN_SCL);
+	(void)i2c_scl_high();
 	i2c_half();
 	pin_low(PIN_SDA);
 	i2c_half();
@@ -319,6 +380,7 @@ i2c_stop(void)
 	pin_low(PIN_SDA);
 	i2c_half();
 	pin_release(PIN_SCL);
+	(void)i2c_scl_high();
 	i2c_half();
 	pin_release(PIN_SDA);
 	i2c_half();
@@ -331,6 +393,7 @@ i2c_recover(void)
 	pin_release(PIN_SDA);
 	for (unsigned i = 0; i < 9; i++) {
 		pin_release(PIN_SCL);
+		(void)i2c_scl_high();
 		i2c_half();
 		pin_low(PIN_SCL);
 		i2c_half();
@@ -351,6 +414,7 @@ i2c_write_byte(uint8_t value)
 		}
 		i2c_half();
 		pin_release(PIN_SCL);
+		(void)i2c_scl_high();
 		i2c_half();
 		pin_low(PIN_SCL);
 		i2c_half();
@@ -360,10 +424,26 @@ i2c_write_byte(uint8_t value)
 	pin_release(PIN_SDA);
 	i2c_half();
 	pin_release(PIN_SCL);
+	(void)i2c_scl_high();
 	i2c_half();
 	ack = !pin_value(PIN_SDA);
 	pin_low(PIN_SCL);
 	i2c_half();
+	return ack;
+}
+
+/*
+ * Just the address byte: does anything on the bus acknowledge it? This separates a dead or
+ * unpowered controller (no ACK) from one that is present but does not like a command.
+ */
+static bool
+i2c_probe(uint8_t addr)
+{
+	bool ack;
+
+	i2c_start();
+	ack = i2c_write_byte((uint8_t)(addr << 1));
+	i2c_stop();
 	return ack;
 }
 
@@ -376,6 +456,7 @@ i2c_read_byte(bool acknowledge)
 	for (unsigned i = 0; i < 8; i++) {
 		i2c_half();
 		pin_release(PIN_SCL);
+		(void)i2c_scl_high();
 		i2c_half();
 		value = (uint8_t)((value << 1) | (pin_value(PIN_SDA) ? 1 : 0));
 		pin_low(PIN_SCL);
@@ -389,6 +470,7 @@ i2c_read_byte(bool acknowledge)
 	}
 	i2c_half();
 	pin_release(PIN_SCL);
+	(void)i2c_scl_high();
 	i2c_half();
 	pin_low(PIN_SCL);
 	i2c_half();
@@ -737,99 +819,77 @@ melfas_set_trigger(uint8_t type)
 	return false;
 }
 
-static void
-fts_thread(__unused void *parameter, __unused wait_result_t result)
+/*
+ * Probe STM first, then Melfas, and initialise whichever answers. The rails must already be
+ * on. Returns true when a controller was found; *is_melfas_out says which one. The caller may
+ * call this twice, once with the rails as Android left them and once after a full cycle.
+ */
+static bool
+probe_touch(bool *is_melfas_out)
 {
 	uint8_t data[16];
-	uint32_t events = 0, touches = 0, reads = 0, errors = 0, status_events = 0;
-	uint32_t latency = 0;
-	uint64_t period;
+	bool is_melfas = false;
+	bool stm_ack = i2c_probe(FTS_ADDRESS);
+	bool melfas_ack = i2c_probe(MELFAS_ADDRESS);
 
-	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
-	PE_parse_boot_argn("touch_swap", &swap_axes, sizeof(swap_axes));
-	PE_parse_boot_argn("touch_flip_x", &flip_x, sizeof(flip_x));
-	PE_parse_boot_argn("touch_flip_y", &flip_y, sizeof(flip_y));
-	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
-	if (poll_us < 1000 || poll_us > 100000) {
-		poll_us = 8000;
-	}
-
-	gpio = ml_io_map(GPIO_PHYS, GPIO_SIZE);
-	iocfg = ml_io_map(IOCFG_PHYS, IOCFG_SIZE);
-	if (gpio == 0 || iocfg == 0) {
-		printf("fts: cannot map the pins\n");
-		thread_terminate(current_thread());
-		return;
-	}
-
-	pwrap = ml_io_map(PWRAP_PHYS, PWRAP_SIZE);
-	pins_to_gpio();
-	sleep_us(2000);
-	touch_power_on();
-	sleep_us(30000);                /* the rails' ramp delay from the device tree is 270 us; be generous */
-
-	/* Before touching the bus: are the two lines even high? Both low means no pull-ups. */
-	printf("fts: pins mode %08x pu %08x pd %08x; idle scl %d sda %d\n",
-	    rd(gpio, MODE_REG(PIN_SCL)), rd(iocfg, IOCFG_PU), rd(iocfg, IOCFG_PD),
-	    pin_value(PIN_SCL) ? 1 : 0, pin_value(PIN_SDA) ? 1 : 0);
+	printf("fts: address 0x%02x %s, 0x%02x %s\n",
+	    FTS_ADDRESS, stm_ack ? "acks" : "silent",
+	    MELFAS_ADDRESS, melfas_ack ? "acks" : "silent");
 
 	i2c_recover();
 
-	bool is_melfas = false;
+	memset(data, 0, sizeof(data));
+	if (fts_read(FTS_READ_DEVICE_ID, data, 5)) {
+		memcpy(device_id, data, sizeof(device_id));
+		have_device_id = true;
+		printf("fts: detected STM FTS5CU56A at 0x%02x\n", FTS_ADDRESS);
+	} else {
+		uint8_t name[16] = { 0 };
+		bool blank = true;
 
-	{
-		memset(data, 0, sizeof(data));
-		if (fts_read(FTS_READ_DEVICE_ID, data, 5)) {
-			memcpy(device_id, data, sizeof(device_id));
-			have_device_id = true;
-			printf("fts: detected STM FTS5CU56A at 0x%02x\n", FTS_ADDRESS);
-		} else {
-			uint8_t name[16] = { 0 };
-			bool blank = true;
-
-			printf("fts: no STM at 0x49, probing Melfas at 0x48...\n");
-			(void)melfas_read(MELFAS_INFO_PRODUCT, name, sizeof(name));
-			for (unsigned i = 0; i < sizeof(name); i++) {
-				if (name[i] != 0x00 && name[i] != 0xff) {
-					blank = false;
-				}
-			}
-			if (!blank) {
-				uint8_t res[4] = { 0 }, ver[8] = { 0 }, nodes[2] = { 0 }, status = 0;
-
-				is_melfas = true;
-				printf("melfas: '%c%c%c%c%c%c%c%c' at 0x48\n",
-				    name[0], name[1], name[2], name[3], name[4], name[5], name[6], name[7]);
-
-				if (melfas_read(MELFAS_INFO_RESOLUTION, res, sizeof(res))) {
-					uint32_t rx = ((uint32_t)res[1] << 8) | res[0];
-					uint32_t ry = ((uint32_t)res[3] << 8) | res[2];
-					if (rx > 0 && rx < 65535) max_x = rx;
-					if (ry > 0 && ry < 65535) max_y = ry;
-				}
-				if (melfas_read(MELFAS_INFO_VERSION, ver, sizeof(ver))) {
-					printf("melfas: version boot %02x%02x core %02x%02x %02x%02x %02x%02x\n",
-					    ver[0], ver[1], ver[2], ver[3], ver[4], ver[5], ver[6], ver[7]);
-				}
-				if (melfas_read(MELFAS_INFO_NODE_X, nodes, sizeof(nodes))) {
-					printf("melfas: %u x nodes, %u y nodes\n", nodes[0], nodes[1]);
-				}
-				if (melfas_read_control(MELFAS_CTRL_STATUS, &status, 1)) {
-					printf("melfas: controller status %02x\n", status);
-				}
-
-				/* Android may have left it in low-power (AOT) mode: ask for normal touch. */
-				(void)melfas_set_mode(MELFAS_MODE_TOUCH);
-				(void)melfas_set_trigger(MELFAS_TRIGGER_INTR);
-				printf("melfas: detected Melfas MSS100 at 0x48 (resolution %ux%u)\n",
-				    max_x + 1, max_y + 1);
-			} else {
-				printf("fts: no answer at 0x49 or 0x48 on i2c6 (gpio%u/gpio%u)\n", PIN_SCL, PIN_SDA);
-				thread_terminate(current_thread());
-				return;
+		printf("fts: no STM at 0x49, probing Melfas at 0x48...\n");
+		(void)melfas_read(MELFAS_INFO_PRODUCT, name, sizeof(name));
+		for (unsigned i = 0; i < sizeof(name); i++) {
+			if (name[i] != 0x00 && name[i] != 0xff) {
+				blank = false;
 			}
 		}
+		if (blank) {
+			return false;
+		}
+
+		{
+			uint8_t res[4] = { 0 }, ver[8] = { 0 }, nodes[2] = { 0 }, status = 0;
+
+			is_melfas = true;
+			printf("melfas: '%c%c%c%c%c%c%c%c' at 0x48\n",
+			    name[0], name[1], name[2], name[3], name[4], name[5], name[6], name[7]);
+
+			if (melfas_read(MELFAS_INFO_RESOLUTION, res, sizeof(res))) {
+				uint32_t rx = ((uint32_t)res[1] << 8) | res[0];
+				uint32_t ry = ((uint32_t)res[3] << 8) | res[2];
+				if (rx > 0 && rx < 65535) max_x = rx;
+				if (ry > 0 && ry < 65535) max_y = ry;
+			}
+			if (melfas_read(MELFAS_INFO_VERSION, ver, sizeof(ver))) {
+				printf("melfas: version boot %02x%02x core %02x%02x %02x%02x %02x%02x\n",
+				    ver[0], ver[1], ver[2], ver[3], ver[4], ver[5], ver[6], ver[7]);
+			}
+			if (melfas_read(MELFAS_INFO_NODE_X, nodes, sizeof(nodes))) {
+				printf("melfas: %u x nodes, %u y nodes\n", nodes[0], nodes[1]);
+			}
+			if (melfas_read_control(MELFAS_CTRL_STATUS, &status, 1)) {
+				printf("melfas: controller status %02x\n", status);
+			}
+
+			/* Android may have left it in low-power (AOT) mode: ask for normal touch. */
+			(void)melfas_set_mode(MELFAS_MODE_TOUCH);
+			(void)melfas_set_trigger(MELFAS_TRIGGER_INTR);
+			printf("melfas: detected Melfas MSS100 at 0x48 (resolution %ux%u)\n",
+			    max_x + 1, max_y + 1);
+		}
 	}
+
 	if (!is_melfas) {
 		memset(data, 0, sizeof(data));
 		if (fts_read(FTS_READ_FW_VERSION, data, 9)) {
@@ -861,6 +921,67 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 		sleep_us(30000);
 		(void)fts_write(FTS_CLEAR_ALL_EVENT, NULL, 0);
+	}
+
+	*is_melfas_out = is_melfas;
+	return true;
+}
+
+static void
+fts_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	uint8_t data[16];
+	uint32_t events = 0, touches = 0, reads = 0, errors = 0, status_events = 0;
+	uint32_t latency = 0;
+	uint64_t period;
+
+	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
+	PE_parse_boot_argn("touch_swap", &swap_axes, sizeof(swap_axes));
+	PE_parse_boot_argn("touch_flip_x", &flip_x, sizeof(flip_x));
+	PE_parse_boot_argn("touch_flip_y", &flip_y, sizeof(flip_y));
+	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
+	if (poll_us < 1000 || poll_us > 100000) {
+		poll_us = 8000;
+	}
+
+	gpio = ml_io_map(GPIO_PHYS, GPIO_SIZE);
+	iocfg = ml_io_map(IOCFG_PHYS, IOCFG_SIZE);
+	if (gpio == 0 || iocfg == 0) {
+		printf("fts: cannot map the pins\n");
+		thread_terminate(current_thread());
+		return;
+	}
+
+	pwrap = ml_io_map(PWRAP_PHYS, PWRAP_SIZE);
+	pins_to_gpio();
+	sleep_us(2000);
+
+	/* Before touching the bus: are the two lines even high? Both low means no pull-ups. */
+	printf("fts: pins mode %08x pu %08x pd %08x; idle scl %d sda %d\n",
+	    rd(gpio, MODE_REG(PIN_SCL)), rd(iocfg, IOCFG_PU), rd(iocfg, IOCFG_PD),
+	    pin_value(PIN_SCL) ? 1 : 0, pin_value(PIN_SDA) ? 1 : 0);
+
+	i2c_recover();
+
+	bool is_melfas = false;
+
+	/*
+	 * First try with the rails exactly as Android left them. The Melfas keeps its firmware
+	 * across Android's screen-off VCAMA2 cycle, and a full power-on reset of its I/O rail
+	 * may leave a RAM-firmware part blank and silent. A full cycle is only the fallback: it
+	 * is what an STM in AOT mode needs, and the STM keeps its firmware in flash.
+	 */
+	touch_power_on(false);
+	sleep_us(200000);
+	if (!probe_touch(&is_melfas)) {
+		printf("fts: first probe failed; cycling both touch rails and trying again\n");
+		touch_power_on(true);
+		sleep_us(250000);
+		if (!probe_touch(&is_melfas)) {
+			printf("fts: no answer at 0x49 or 0x48 on i2c6 (gpio%u/gpio%u)\n", PIN_SCL, PIN_SDA);
+			thread_terminate(current_thread());
+			return;
+		}
 	}
 	printf("fts: touch screen ready; asked every %u us, %ux%u scaled to 65535\n", poll_us, max_x + 1, max_y + 1);
 

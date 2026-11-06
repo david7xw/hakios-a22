@@ -31,7 +31,7 @@ Open drain by direction: a pin is pulled low by making it an output at 0 and let
 it an input again; the pull-up brings it back. Reads are one write of the command byte, a
 repeated start, then the data.
 
-## Power: two rails, and a power cycle is the only reset
+## Power: two rails, enable first, cycle only as a fallback
 
 | rail | what | how it is switched on |
 | --- | --- | --- |
@@ -39,12 +39,20 @@ repeated start, then the data.
 | PMIC VCAMA2 | 3.0 V analog (`tsp_avdd_ldo`) | MT6358 `VCAMA2_CON0` bit 0, `OP_EN` bit 0, `ANA_CON0` VOSEL 3.0 V |
 
 Both are needed: with only GPIO4 on, the controller answers on I2C but never reports a finger.
-The device tree gives neither controller a reset GPIO, so the rails are also the reset. Android
-leaves the chip powered and, when its screen is off, in low-power/AOT mode. A warm boot into
-XNU does not power-cycle it. The driver therefore switches VCAMA2 off, waits 4 ms, drives GPIO4
-low, waits 20 ms, then brings GPIO4 high first, waits 1 ms, and enables VCAMA2, followed by
-100 ms for the controller's own power-on. That is Samsung's `sec_input_power()` order, and it
-is what makes the chip return to its power-on state before the first I2C read.
+The A22 on this bench has the **Melfas MSS100**, selected by the ICID strap on GPIO28; the STM
+is the other possible panel.
+
+Android keeps the I/O rail on and switches only VCAMA2 for screen off/on, and the Melfas keeps
+answering across that. The driver's first attempt therefore does the same: make GPIO4 high,
+enable VCAMA2 at 3.0 V, and wait 250 ms. It does **not** pull GPIO4 low. A full power-on reset
+is only the fallback, because a controller whose firmware lives in RAM would come back blank
+and silent at `0x48`. The fallback is what an STM in Android's AOT state may need: VCAMA2 off,
+50 ms, GPIO4 low, 100 ms, GPIO4 high, 10 ms, VCAMA2 on, 250 ms. The STM keeps its firmware in
+flash, so that is safe for it.
+
+Before either attempt the interrupt line (GPIO10) and the ICID strap (GPIO28) are made ordinary
+inputs at function 0, as Linux's Melfas pinctrl states do; the loader or Android may have left
+either driven. Their pull settings are left as the board's pinctrl set them.
 
 ## STM: the one that was already documented
 
@@ -101,8 +109,15 @@ to `INTR`. If no finger arrives it repeats the mode/trigger request once a minut
 The first Melfas support enabled the rails but did not cycle them, and it wrote the control
 registers on a chip that might still be in Android's AOT state. The later commit removed the
 control writes entirely, which left the chip asleep after a warm boot and left the event
-decoder treating a move as a press. The fix in this tree does all of it: power-cycle, verify
-the mode, set the trigger, decode 1-based ids, and post `MOVE` for a move.
+decoder treating a move as a press. A third attempt then power-cycled both rails before the
+probe; on a Melfas that lost its firmware with the I/O rail, that left no answer at either
+address at all.
+
+The fix in this tree does all of it in the right order: enable VCAMA2 without dropping GPIO4
+first, probe STM then Melfas, and only power-cycle both rails if that first probe fails. It
+also makes GPIO10 and GPIO28 inputs before power-on, waits for SCL to actually go high after
+each release (the controller may clock-stretch), logs whether each address acknowledges, and
+verifies the mode, sets the trigger, decodes 1-based ids, and posts `MOVE` for a move.
 
 ## Reading a run
 
