@@ -32,6 +32,7 @@ extern "C" {
 #include <console/video_console.h>
 extern struct vc_info vinfo;            /* the boot framebuffer, as the text console knows it */
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern bool redwood_mali_wait(uint64_t seq, uint64_t timeout_ns);   /* bsd/dev/hakios.mali.c */
 }
 
 /*
@@ -44,6 +45,122 @@ static volatile uint32_t * gMTKMutex;
 static volatile uint32_t * gMTKConfig;
 static volatile uint32_t * gMTKDSI;
 static bool gMTKMutexOn;
+
+/*
+ * The panel's TEARING EFFECT signal: the DDIC pulses GPIO 44 at the start of every frame (the DT's
+ * lcm_dsi_te, pinmux 0x2c01, and the dsi_te node whose interrupt is that pin). Starting the DSI
+ * transfer on a TE edge is what keeps the DDIC's scanout and the GRAM write apart; without it the
+ * transfer begins wherever the presenter happens to be, the scanout can pass the write, and the
+ * panel shows the old frame above the new. Polled here, on the presenter's own thread, with a
+ * timeout and a fallback: if no edge is seen in the first frames the pin is not wired as we
+ * think, and the kick goes as before. Measured on the A32 (test78): no edges were seen on gpio44
+ * and the 20 ms timeout cost frames, so this is off unless te_sync=1 asks for it.
+ */
+static TUNABLE(uint32_t, gTESync, "te_sync", 0);   /* opt-in: see below */
+static volatile uint32_t * gTE;
+static int gTEState;                    /* 0: untried, 1: edges seen, -1: no TE here */
+static uint64_t gTELast;
+
+static void
+te_init(void)
+{
+	if (gTE != NULL || gTEState != 0) {
+		return;
+	}
+	gTE = (volatile uint32_t *) ml_io_map(0x10005000, 0x1000);
+	if (gTE == NULL) {
+		gTEState = -1;
+		return;
+	}
+	/* pin 44: function 0 (GPIO), direction in. MODE at 0x300 + (44/8)*0x10, four bits a pin;
+	 * bank 1, bit 12 for direction and input. */
+	{
+		uint32_t mode = gTE[0x350 / 4];
+
+		mode &= ~(0xfu << ((44 % 8) * 4));
+		gTE[0x350 / 4] = mode;
+	}
+	gTE[0x018 / 4] = 1u << 12;              /* DIR_CLR bank 1: input */
+}
+
+static uint32_t
+te_level(void)
+{
+	return (gTE[0x210 / 4] >> 12) & 1u;     /* DIN bank 1, bit 12 */
+}
+
+/* One edge, at most one per 5 ms (the pulse has two, a few microseconds apart). */
+static bool
+te_wait(uint32_t ms)
+{
+	uint32_t start, i;
+	uint64_t now;
+
+	if (!gMTKKick || !gTESync || gTEState < 0) {
+		return false;
+	}
+	if (gTEState == 0) {
+		te_init();
+		if (gTE == NULL) {
+			return false;
+		}
+	}
+	start = te_level();
+	for (i = 0; i < ms * 1000; i++) {
+		if (te_level() != start) {
+			now = mach_absolute_time();
+			{
+				uint64_t us;
+
+				absolutetime_to_nanoseconds(now - gTELast, &us);
+				if (gTELast != 0 && us < 5u * NSEC_PER_MSEC) {
+					start = te_level();
+					continue;
+				}
+			}
+			gTELast = now;
+			if (gTEState == 0) {
+				gTEState = 1;
+				IOLog("te: gpio44: an edge seen; the DSI transfer starts on it\n");
+			}
+			return true;
+		}
+		delay(1);
+	}
+	if (gTEState == 0) {
+		gTEState = -1;
+		IOLog("te: gpio44 never moved in %u ms; the kick goes without it\n", ms);
+	}
+	return false;
+}
+
+/* Is the DSI done with the frame before? (0x1401400c bit 31, DSI_BUSY) A frame is 11 ms on
+ * this panel, and the framebuffer must not be overwritten while the DSI reads it: the watcher
+ * in the loader used to start the transfer whenever it liked, and the presenter then drew the
+ * next frame into the same memory, so the panel received half of each. The presenter waits for
+ * idle before drawing and kicks after; mtk_kick=1. */
+static bool
+mtk_panel_idle(uint32_t ms)
+{
+	uint32_t waited;
+
+	if (!gMTKKick) {
+		return true;
+	}
+	if (gMTKDSI == NULL) {
+		gMTKDSI = (volatile uint32_t *) ml_io_map(0x14014000, 0x1000);
+	}
+	if (gMTKDSI == NULL) {
+		return true;
+	}
+	for (waited = 0; waited < ms * 100; waited++) {
+		if ((gMTKDSI[0x0c / 4] & 0x80000000u) == 0) {
+			return true;
+		}
+		delay(10);
+	}
+	return false;
+}
 
 static void
 mtk_panel_kick(void)
@@ -60,6 +177,8 @@ mtk_panel_kick(void)
 	if (gMTKMutex == NULL || gMTKConfig == NULL || gMTKDSI == NULL) {
 		return;
 	}
+	(void)mtk_panel_idle(50);
+	(void)te_wait(20);
 	if (!gMTKMutexOn) {
 		gMTKDSI[0x90 / 4] = 0x3c;       /* DSI_MEM_CONTI = WMEM_CONTI: frame data to the DDIC */
 		gMTKMutex[0x30 / 4] = 0x90380;  /* MOD0: OVL0(7)|OVL0_2L(8)|RDMA0(9)|DSI0(16)|PWM0(19) */
@@ -308,6 +427,15 @@ public:
 	IOLock *        fSwapLock;              /* around the next five */
 	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
+	/*
+	 * The job each surface stood for WHEN THE SWAP WAS QUEUED. The surface's own maliSeq is
+	 * the last job that named it, and a later job that only READS the surface (a blur of the
+	 * screen behind a sheet) moves it on: waiting on the live field made the display wait for
+	 * work that had nothing to do with this frame, gave up after SWAP_GPU_MS and showed a
+	 * surface half drawn (test77: "the GPU is not done with surface 3 after 500 ms; shown as
+	 * it is", and the torn sheet in the picture).
+	 */
+	uint64_t        fSwapSeq[SWAP_QUEUE][SWAP_LAYERS];
 	unsigned        fSwapFirst, fSwapsWaiting;
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
@@ -356,7 +484,7 @@ public:
 	void publishModes(void);
 	MiniIOSurface * defaultSurface(void);
 	void present(const uint8_t * swap);
-	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
+	void show(const uint8_t * swap, MiniIOSurface ** surfaces, const uint64_t * seqs);
 	void presenter(void);
 	static void presenterMain(void * self, wait_result_t result);
 	void reportFrameTimes(void);
@@ -949,6 +1077,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+		fSwapSeq[slot][layer] = fSwapSurfaces[slot][layer] != NULL ? fSwapSurfaces[slot][layer]->maliSeq : 0;
 	}
 	fSwapsWaiting++;
 	IOLockWakeup(fSwapLock, fSwap, true);
@@ -966,6 +1095,7 @@ IOMobileFramebuffer::presenter(void)
 {
 	static uint8_t swap[SWAP_SIZE];         /* (one thread) */
 	MiniIOSurface * surfaces[SWAP_LAYERS];
+	uint64_t seqs[SWAP_LAYERS];
 
 	for (;;) {
 		IOLockLock(fSwapLock);
@@ -974,8 +1104,9 @@ IOMobileFramebuffer::presenter(void)
 		}
 		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
 		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
+		memcpy(seqs, fSwapSeq[fSwapFirst], sizeof(seqs));
 		IOLockUnlock(fSwapLock);
-		show(swap, surfaces);
+		show(swap, surfaces, seqs);
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 			if (surfaces[layer] != NULL) {
 				MiniIOSurfaceDrop(surfaces[layer]);
@@ -987,7 +1118,7 @@ IOMobileFramebuffer::presenter(void)
 
 /* A swap's surfaces onto the panel, once the GPU is done with them. */
 void
-IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces, const uint64_t * seqs)
 {
 	uint32_t set = swapWord(swap, SWAP_LAYERS_SET);
 	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
@@ -996,9 +1127,13 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	bool report;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
-		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
-			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
-			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+		uint64_t seq = seqs != NULL ? seqs[layer] : 0;
+
+		if (surfaces[layer] != NULL && seq != 0 &&
+		    !redwood_mali_wait(seq, (uint64_t) SWAP_GPU_MS * NSEC_PER_MSEC)) {
+			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u (job %llu) "
+			    "after %u ms; shown as it is\n", swapWord(swap, SWAP_ID),
+			    swapWord(swap, SWAP_SURFACE(layer)), seq, SWAP_GPU_MS);
 		}
 	}
 	fStatWaiting += mach_absolute_time() - began;
@@ -1052,6 +1187,8 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
 	}
+	/* the frame before must be out of the DSI before this one is drawn over it */
+	(void)mtk_panel_idle(50);
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 		int32_t src[4], dst[4];
@@ -1536,22 +1673,123 @@ publishDisplayNode(void)
  * service of this class to appear before it looks for a GPU at all (once per process). An
  * accelerator without the properties that name its Metal and OpenGL ES drivers is passed
  * over by both, which leaves CoreAnimation with its software renderer, as before.
+ *
+ * With boot-arg metal=1 a user process may put those two properties here, which is the whole
+ * of what keeps Metal from finding our driver (Metal reads MetalPluginName off this service,
+ * opens /System/Library/Extensions/<it>.bundle and takes the class MetalPluginClassName names).
  */
+#define kAcceleratorPluginNameKey       "MetalPluginName"
+#define kAcceleratorPluginClassNameKey  "MetalPluginClassName"
+
+static bool gAcceleratorTakesProperties;        /* boot-arg metal=1 */
+
 class IOAcceleratorES : public IOService
 {
 	OSDeclareDefaultStructors(IOAcceleratorES);
+
+public:
+	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
+
+/*
+ * The switch, from user space (metal_props): IORegistryEntrySetCFProperties() with the two
+ * keys. Everything else is refused whole: this method exists for this one switch only. An empty
+ * string removes a property, which is the way out without a reboot (the properties live only in
+ * the registry, so processes started after they are gone go back to the software road).
+ */
+IOReturn
+IOAcceleratorES::setProperties(OSObject * properties)
+{
+	OSDictionary * dict = OSDynamicCast(OSDictionary, properties);
+	OSCollectionIterator * keys;
+	OSObject * next;
+	char who[32] = "?";
+
+	if (!gAcceleratorTakesProperties) {
+		static unsigned said;
+
+		if (said++ < 4) {
+			proc_selfname(who, sizeof(who));
+			IOLog("IOAcceleratorES: %s asks to set properties on it; boot-arg metal=1 was not given\n", who);
+		}
+		return kIOReturnUnsupported;
+	}
+	if (dict == NULL || dict->getCount() == 0) {
+		return kIOReturnBadArgument;
+	}
+	keys = OSCollectionIterator::withCollection(dict);
+	if (keys == NULL) {
+		return kIOReturnNoMemory;
+	}
+	proc_selfname(who, sizeof(who));
+	while ((next = keys->getNextObject()) != NULL) {
+		const OSSymbol * key = OSDynamicCast(OSSymbol, next);
+
+		if (key == NULL || (!key->isEqualTo(kAcceleratorPluginNameKey) &&
+		    !key->isEqualTo(kAcceleratorPluginClassNameKey))) {
+			IOLog("IOAcceleratorES: refusing what %s sent: only " kAcceleratorPluginNameKey " and "
+			    kAcceleratorPluginClassNameKey " are taken here\n", who);
+			keys->release();
+			return kIOReturnUnsupported;
+		}
+		if (OSDynamicCast(OSString, dict->getObject(key)) == NULL) {
+			IOLog("IOAcceleratorES: refusing \"%s\" from %s: Metal reads it as a CFString\n",
+			    key->getCStringNoCopy(), who);
+			keys->release();
+			return kIOReturnBadArgument;
+		}
+	}
+	keys->reset();
+	while ((next = keys->getNextObject()) != NULL) {
+		const OSSymbol * key = OSDynamicCast(OSSymbol, next);
+		OSString * value = OSDynamicCast(OSString, dict->getObject(key));
+
+		if (value->getLength() == 0) {
+			removeProperty(key);
+			IOLog("IOAcceleratorES: %s removed by %s\n", key->getCStringNoCopy(), who);
+		} else if (setProperty(key, value)) {
+			IOLog("IOAcceleratorES: %s = %s, set by %s\n", key->getCStringNoCopy(),
+			    value->getCStringNoCopy(), who);
+		} else {
+			IOLog("IOAcceleratorES: %s could not be set\n", key->getCStringNoCopy());
+			keys->release();
+			return kIOReturnNoMemory;
+		}
+	}
+	keys->release();
+	return kIOReturnSuccess;
+}
 
 static void
 publishAccelerator(IOService * provider)
 {
 	IOAcceleratorES * accelerator = OSTypeAlloc(IOAcceleratorES);
+	uint32_t metal = 0;
 
+	gAcceleratorTakesProperties = PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0;
 	if (accelerator != NULL && accelerator->init() && accelerator->attach(provider)) {
 		accelerator->setName("sgx");
 		accelerator->registerService();
+		if (gAcceleratorTakesProperties) {
+			uint32_t plugin = 0;
+
+			IOLog("IOAcceleratorES: metal=%u: this service takes " kAcceleratorPluginNameKey
+			    " and " kAcceleratorPluginClassNameKey " from user space\n", metal);
+			/*
+			 * metal_plugin=1: the two properties are set HERE, before launchd exists, so that
+			 * backboardd and SpringBoard find the driver when they build their renderers. The
+			 * userland switch (metal_props) is for a boot where only one process is meant to
+			 * take the Metal road; this one is for CoreAnimation itself, which asks once, early.
+			 */
+			if (PE_parse_boot_argn("metal_plugin", &plugin, sizeof(plugin)) && plugin != 0) {
+				accelerator->setProperty(kAcceleratorPluginNameKey, "RedwoodMetal");
+				accelerator->setProperty(kAcceleratorPluginClassNameKey, "RedwoodMetalDevice");
+				IOLog("IOAcceleratorES: metal_plugin=%u: MetalPluginName = RedwoodMetal, "
+				    "MetalPluginClassName = RedwoodMetalDevice, published at start\n", plugin);
+			}
+		}
 	}
 	OSSafeReleaseNULL(accelerator);
 }
