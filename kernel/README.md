@@ -4,6 +4,23 @@ These files sit at the paths they have in the common kernel tree (`xnu-8796.121.
 them over it and rebuild. Everything here is APSL 2.0, except nothing: all of it is built
 into XNU.
 
+## Building over the common tree
+
+After `xnu/apply.sh` has made `xnu-src/xnu-8796.121.2`, run:
+
+```sh
+kernel/overlay.sh xnu-src/xnu-8796.121.2
+make kernel
+```
+
+`kernel/overlay.sh` copies the files below, but deliberately **does not** copy the old
+`bsd/conf/files` or `iokit/conf/files` snapshots in this repository: those would replace the
+common tree's HFS/APFS entries and the common driver list. It appends the six A22-only drivers
+and `iokit/Kernel/hakios.mali.cpp` after the common HakiOS block instead. `make kernel` runs
+`tools/hakios-config.py kernel` and rewrites only that block, so the appended lines survive.
+The script also touches the copied files so `xnu/sync-drivers.sh` does not put the common
+Qualcomm versions back over them.
+
 | file | state | what |
 | --- | --- | --- |
 | `bsd/dev/hakios.fts.c` | new | the touch screen: STM FTS5CU56A on I2C6 at 0x49, I2C bit-banged on GPIO89/90, GPIO4 and PMIC VCAMA2 switched on, 16-byte events read every 8 ms and posted to `/dev/hakios-touch` (`touchscreen=3`) |
@@ -19,7 +36,7 @@ into XNU.
 | `bsd/dev/hakios.goodix.c` | changed | only `touchscreen=1` starts the Goodix/FocalTech driver; `touchscreen=3` is this phone's STM |
 | `bsd/dev/hakios.battery.c` | changed | only `battery=1` uses the Qualcomm UEFI cache; `battery=2` is the A22's MT6358 driver |
 | `bsd/dev/hakios.buttons.c` | changed | only `buttons=1` starts the Qualcomm SPMI button driver; `buttons=2` is `hakios.mtkkeys.c` |
-| `bsd/conf/files` | changed | lists `hakios.fts.c`, `hakios.mtkkeys.c` and `hakios.mali.c` |
+| `bsd/conf/files` | reference only | the old snapshot lists `hakios.fts.c`, `hakios.mtkkeys.c` and `hakios.mali.c`; `overlay.sh` does not copy it and appends all six A22 drivers to the common file instead |
 | `iokit/Kernel/MiniIOMobileFramebuffer.cpp` | changed | `mtk_kick` defaults to 0: the A22's DSI panel is kicked by the loader's watcher (with the DSI busy check), not by every frame from the kernel |
 
 ## Boot arguments

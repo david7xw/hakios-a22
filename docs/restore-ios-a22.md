@@ -103,9 +103,16 @@ rsync -a <this-repo>/ hakios/
 cd hakios
 xnu-deps/setup.sh                 # host tools, SDK, open-source dependencies
 make images                       # root.apfs + system.apfs (needs sysimage/)
-make kernel                       # applies the XNU patch and builds hakios-kernel
+xnu/apply.sh                      # Apple's XNU + the common HakiOS patch
+kernel/overlay.sh                 # this repository's A22 drivers (not the old conf/files)
+make kernel                       # builds hakios-kernel
 make loader                       # builds xnuloader with identity.h
 ```
+
+`kernel/overlay.sh` is required after `xnu/apply.sh`: it installs the A22 touch, Mali, MTK
+clock/battery/key/SCP drivers and appends them to the common `bsd/conf/files` and
+`iokit/conf/files`. Copying this repository's `kernel/bsd` over the tree by hand instead would
+also copy an old `bsd/conf/files` and drop HFS/APFS; see [`../kernel/README.md`](../kernel/README.md).
 
 `xnu-deps/setup.sh` needs `git curl tar xz make cc clang flex bison m4 perl python3
 autoconf automake` and a theos install with the Linux cctools and `iPhoneOS16.5.sdk`
