@@ -128,8 +128,20 @@ static vm_offset_t arb_core, arb_cnfg, arb_observer;
  * driver, bsd/dev/hakios.torch.c, as well): with two at once the arbiter drops one ("the transfer
  * was dropped"), as Linux never lets happen (one lock for the bus).
  */
-extern void hakios_spmi_lock(void);
-extern void hakios_spmi_unlock(void);
+static LCK_GRP_DECLARE(spmi_lck_grp, "hakios-spmi");
+static LCK_SPIN_DECLARE(spmi_lock, &spmi_lck_grp);
+
+void
+hakios_spmi_lock(void)
+{
+	lck_spin_lock(&spmi_lock);
+}
+
+void
+hakios_spmi_unlock(void)
+{
+	lck_spin_unlock(&spmi_lock);
+}
 
 struct peripheral {
 	const char *    name;
