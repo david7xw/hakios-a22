@@ -1,9 +1,13 @@
 # A ten-minute run (test41)
 
+> This is the A32 tree's test41, inherited with the device files; it has not been repeated on
+> the A22. The A22's loader does not arm TOPRGU or stop its watcher by default, so its run
+> ends differently (see the README).
+
 `xnu-a32-emmc-test41-stability.img`, boot arguments:
 
 ```
-cpus=4 fbscale=3 touchscreen=3 buttons=2 mtk_cpufreq=3 battery=2 mali=1
+cpus=4 fbscale=2 touchscreen=3 buttons=2 mtk_cpufreq=3 battery=2 mali=1
 ```
 
 The phone was used for ten minutes: Settings, Photos, Maps, Safari, switching apps,

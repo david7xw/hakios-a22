@@ -21,7 +21,7 @@ the end of `userdata`) and the kernel reads it off the eMMC as it needs it.
 | touch | partial | STM FTS5CU56A or Melfas MSS100 on I2C6 at 0x49/0x48, bit-banged on GPIO89/90 (`kernel/bsd/dev/hakios.fts.c`); the rails are power-cycled and both controllers are initialised (Melfas: normal touch mode + interrupt trigger, 1-based ids), needs a run to confirm on the phone (`docs/touch-a22.md`) |
 | buttons | works | power and volume up/down (`kernel/bsd/dev/hakios.mtkkeys.c`) |
 | GPU | partial | Mali-G52 r1p0 brought up (step 6/6), the panfrost service `RedwoodMali` running with the syncobj/`submit_ex`/cache-clean interface, Mesa panfrost + the `hakios-drm` shim building by default; the A32's blit/readback stall is still open, so CoreAnimation may stay in software (`docs/gpu-a22.md`) |
-| CPU | works | 4 cores; A75 at 1999 MHz and A55 at 1699 MHz with `mtk_cpufreq=3` (`kernel/bsd/dev/hakios.mtkcpufreq.c`); a ten-minute run stayed there (`docs/stability-a22.md`) |
+| CPU | works | 4 cores; A75 at 1999 MHz and A55 at 1699 MHz with `mtk_cpufreq=3` (`kernel/bsd/dev/hakios.mtkcpufreq.c`); the inherited A32 ten-minute run stayed there (`docs/stability-a22.md`), not yet repeated on the A22 |
 | battery | works | MT6358 `BATADC` (voltage, 3:1 divider) and `CHRDET`, `battery=2`; temperature and current are still placeholders |
 | sensors | partial | the SCP sensor hub runs and the accelerometer streams (`scp_step=6`, `kernel/bsd/dev/hakios.scp.c`); turning the samples into screen rotation is still user-space work |
 | Wi-Fi / Bluetooth, audio, camera, cellular | missing | |
@@ -108,11 +108,11 @@ adb shell 'printf DARWIN-REDWOOD:BOOT-XNU > /dev/pmsg0'
 adb reboot
 ```
 
-XNU runs for the loader's watchdog (300 s is the value used here), returns to the loader,
-and the loader starts Android with the run's log in
-`/sys/fs/pstore/console-ramoops-2` (readable without root on this phone). Do not reboot by
-hand while XNU runs: that loses the log. Five fingers held on the screen for 1.5 s also
-return to the loader and keep it.
+By default XNU runs until five fingers are held on the screen for 1.5 s (or the phone is
+reset); the loader does not arm TOPRGU and does not stop its panel watcher. Build with
+`XNU_WATCH_SECONDS`/`XNU_WDT_SECONDS` non-zero to get the timed return the A32 uses. Either
+way the run's log is in `/sys/fs/pstore/console-ramoops-2` (readable without root on this
+phone). Do not reboot by hand while XNU runs: that loses the log.
 
 ## Licenses
 

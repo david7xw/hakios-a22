@@ -92,8 +92,10 @@ the fallback runs `make` in the cloned lzfse tree (older versions of the script 
 ## Build the system image
 
 The kernel and user space expect to be built from the common tree; this repository is the
-A22 layer on top of it. A reliable layout is a fresh common checkout with this repository's
-files copied over it:
+A22 layer on top of it. The common tree also supplies files this repository does not track,
+notably `Makefile`, `xnu-env.sh`, `tools/apfs`, and `userland/var`; building from this
+repository alone will miss them. A reliable layout is a fresh common checkout with this
+repository's files copied over it:
 
 ```sh
 git clone --depth 1 https://github.com/oosexgang/hakios-xnu-kernel.git hakios
