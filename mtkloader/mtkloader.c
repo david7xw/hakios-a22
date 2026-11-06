@@ -1852,7 +1852,13 @@ void watcher_main(void)
 	watcher_started = 1;
 	dcache_clean_range((uint64_t)&watcher_started, 8);
 
-	for (;;) {
+	/*
+	 * XNU_WATCH_SECONDS=0 keeps the watcher running for the whole run (it is what kicks the
+	 * A22's panel; do not stop it there). A non-zero value takes the snapshot and returns to
+	 * Android after that many seconds, as the A32's watcher does.
+	 */
+	uint64_t end = dbg_ticks() + dbg_freq() * XNU_WATCH_SECONDS;
+	while (XNU_WATCH_SECONDS == 0 || dbg_ticks() < end) {
 		dcache_clean_range((uint64_t)&xnu_back, 8);
 		if (xnu_back) {
 			for (;;) {
@@ -1862,6 +1868,7 @@ void watcher_main(void)
 		watcher_display_kick();
 		dbg_delay_ms(16);
 	}
+	dcache_clean_range((uint64_t)&xnu_back, 8);
 	if (xnu_back) {
 		for (;;) {
 			__asm__ volatile("wfe");
@@ -2410,10 +2417,26 @@ static void __attribute__((noreturn)) run_xnu(void)
 	out("\n");
 	display_alpha_off();
 
-	/* Watchdog nuked: completely disable TOPRGU hardware watchdog */
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
-	marker_set(0);
-	out("watchdog: nuked / disabled (XNU runs indefinitely)\n");
+	/*
+	 * XNU_WDT_SECONDS=0 (the A22's default) keeps TOPRGU off: the run ends on the watcher's
+	 * snapshot, on the five-finger hold, or by hand. A non-zero value arms the hardware
+	 * watchdog, capped at its 31 s maximum, so a wedged kernel returns to Android by itself.
+	 */
+	if (XNU_WDT_SECONDS) {
+		uint32_t t = XNU_WDT_SECONDS > 31 ? 31 : XNU_WDT_SECONDS;
+
+		marker_set(MARK_RUNNING);
+		wr32(TOPRGU_LENGTH, ((t * 32768u / 512u) << 5) | 0x8u);
+		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x1u);
+		out("watchdog: back to Android in ");
+		out_dec(t);
+		out(" s\n");
+	} else {
+		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
+		marker_set(0);
+		out("watchdog: disabled (XNU runs indefinitely)\n");
+	}
 	/* The timers XNU will use: a virtual counter offset by EL2 (MediaTek's GenieZone) would
 	 * leave its deadlines forever in the future, and the kernel idle with nothing to wake it. */
 	{
