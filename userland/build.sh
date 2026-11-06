@@ -47,6 +47,13 @@
 #                                   and nothing changes (src/inject.c, opengl_es()).
 #                                   GL=test: only the library and bin/gl_test (a triangle, src/gl_test.c;
 #                                   RC_JOBS=rc.jobs.gltest runs it); the window server stays as it is.
+#                      METAL=1      with GL=1: the Mali Metal driver (docs/metal-a22.md) --
+#                                   lib/libredwoodmetal.dylib, lib/RedwoodMetal.bundle,
+#                                   lib/libredwoodair.dylib -> libOSMesa.8.dylib, and
+#                                   bin/metal_props, metal_drv_test, say_run. The compiler is
+#                                   built into libOSMesa by panfrost-osmesa-air.patch. SYSTEM=1
+#                                   once after adding it, so the system image gets the
+#                                   /System/Library/Extensions/RedwoodMetal.bundle symlink.
 #                      ADSP=1       with the audio DSP's firmware from ../fw-audio in fw/ (20 MB; for the
 #                                   kernel's adsp_step=N, drivers/audio/hakios.adsp.c, which runs before the root is
 #                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
@@ -59,7 +66,9 @@
 #                    real one is /sbin/launchd.darwin). 2.5 GB; upload once per loader session with
 #                    `xl ramdisk userland/system.apfs`. Rebuilt when missing, when its inputs
 #                    (stage0, the manifest, the cryptex files) are newer, or with SYSTEM=1 (after
-#                    changing the recipe below).
+#                    changing the recipe below). With METAL=1 the build appends the
+#                    RedwoodMetal.bundle symlink to a copy of the manifest and passes that copy
+#                    to mkapfs.py; the manifest itself is left as select-system.py wrote it.
 #   flashboot.apfs   FLASHBOOT=1: the RAM part of a boot whose root is the Darwin volume on the phone's
 #                    flash (see below); with CRYPTEXES=flash the boot volume alone, the cryptexes being
 #                    on the flash. FLASHBOOT=1 also decides what goes into root.apfs: the job list is
@@ -245,12 +254,37 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			echo "build.sh: HakiosMetal with hakios-metal ($HM)"
 		fi
 		$DYN -bundle -framework Foundation -framework Metal -lobjc -o obj/HakiosMetal src/HakiosMetal.m src/hakios_metallib.c $METAL_GPU
+		if [ -n "$METAL" ]; then
+			# The Mali Metal driver: the core in C++ (src/metal) and Metal's own classes over it
+			# (src/redwoodmetal.m). Its compiler is libredwoodair.dylib, which on this port is
+			# libOSMesa.8.dylib (tools/mesa/panfrost-osmesa-air.patch); the bundle is what Metal
+			# discovery opens, the dylib is what metal_drv_test loads directly.
+			CXX=${DYN/xnu-clang/xnu-clang++}
+			mkdir -p obj/metal
+			METAL_OBJS=
+			for f in air buffer log texture blit draw command recipes import perf plib shape argenc run worker surfaces render compute cmdbuf pipeline drawable; do
+				$CXX -Os -std=c++20 -fno-exceptions -fno-rtti -I../tools/mesa/air -Isrc \
+					-c src/metal/$f.cpp -o obj/metal/$f.o
+				METAL_OBJS="$METAL_OBJS obj/metal/$f.o"
+			done
+			$DYN -Os -I../tools/mesa/air -Isrc -c src/redwoodmetal.m -o obj/metal/redwoodmetal.o
+			$DYN -Os -bundle -framework Foundation -framework IOKit -framework IOSurface -framework Metal -lobjc \
+				-lc++ -o obj/RedwoodMetal obj/metal/redwoodmetal.o $METAL_OBJS
+			$DYN -Os -dynamiclib -install_name /redwood/lib/libredwoodmetal.dylib \
+				-framework Foundation -framework IOKit -framework IOSurface -framework Metal -lobjc \
+				-lc++ -o obj/libredwoodmetal.dylib obj/metal/redwoodmetal.o $METAL_OBJS
+			$DYN -framework CoreFoundation -framework IOKit -o obj/metal_props src/metal_props.c
+			$DYN -framework Foundation -framework IOKit -framework Metal -lobjc -o obj/metal_drv_test src/metal_drv_test.m
+			$DYN -o obj/tolog src/tolog.c
+			$DYN -o obj/psgrep src/psgrep.c
+			$DYN -o obj/say_run src/say_run.c
+		fi
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
 			M=../xnu-deps/build/mesa/out
-			[ "$(cat $M/built-from 2>/dev/null)" = "$(cat ../tools/mesa/*.patch ../tools/mesa/hakios-drm/* | sha256sum)" ] ||
-				../tools/mk-mesa.sh
+			[ "$(cat $M/built-from 2>/dev/null)" = "$(cat ../tools/mesa/*.patch ../tools/mesa/air/* ../tools/mesa/hakios-drm/* | sha256sum)" ] ||
+				AIR=1 ../tools/mk-mesa.sh
 			./mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h
 			$DYN -dynamiclib -install_name /redwood/lib/libhakios.gl.dylib -Iobj -framework CoreFoundation \
 				-framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o obj/libhakios.gl.dylib \
@@ -304,6 +338,17 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		mkdir -p root/lib/HakiosMetal.bundle
 		cp obj/HakiosMetal root/lib/HakiosMetal.bundle/
 		cp src/HakiosMetal.plist root/lib/HakiosMetal.bundle/Info.plist
+	fi
+	if [ -n "$METAL" ]; then
+		mkdir -p root/lib/RedwoodMetal.bundle
+		cp obj/RedwoodMetal root/lib/RedwoodMetal.bundle/
+		cp src/metal_plugin.plist root/lib/RedwoodMetal.bundle/Info.plist
+		cp obj/libredwoodmetal.dylib root/lib/
+		cp obj/metal_props obj/metal_drv_test obj/tolog obj/psgrep obj/say_run root/bin/
+		# On the Mali the compiler is inside libOSMesa (tools/mesa/panfrost-osmesa-air.patch),
+		# and the driver dlopens this name.
+		ln -sfn libOSMesa.8.dylib root/lib/libredwoodair.dylib
+		[ ! -f share/rwm-recipes.txt ] || { mkdir -p root/share; cp share/rwm-recipes.txt root/share/rwm-recipes.txt; }
 	fi
 	if [ -n "$GL" ]; then
 		cp obj/libOSMesa.8.dylib root/lib/
@@ -625,6 +670,7 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	ln -s /redwood/lib/HakiosAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver
 	# the plug-in Metal opens when the accelerator names it (boot-arg metal=1; without it nothing names this bundle)
 	mkdir -p sysroot/System/Library/Extensions
+	[ -d root/lib/RedwoodMetal.bundle ] && ln -sfn /redwood/lib/RedwoodMetal.bundle sysroot/System/Library/Extensions/RedwoodMetal.bundle
 	[ -d root/lib/HakiosMetal.bundle ] && ln -sfn /redwood/lib/HakiosMetal.bundle sysroot/System/Library/Extensions/HakiosMetal.bundle
 	# the OS cryptex: on a device a separate volume grafted at /System/Cryptexes/OS. It holds the dyld
 	# shared cache (dyld looks there first) and a few libraries and resources outside the cache.
@@ -642,7 +688,18 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	done
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
 	# files in 2.5 GB, what fits into the phone's RAM beside Darwin
-	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$DARWIN/system.manifest | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$DARWIN/system.manifest
+	#
+	# The system manifest lists what select-system.py chose; our Metal bundle lives on the
+	# root volume (/redwood/lib), so the system volume gets only a symlink to it. A line in a
+	# copy of the manifest is enough for mkapfs.py (apply_manifest makes a link with no tree
+	# entry), and keeps the manifest itself as select-system.py wrote it.
+	SYS_MANIFEST=$DARWIN/system.manifest
+	if [ -n "$METAL" ]; then
+		SYS_MANIFEST=obj/system.manifest.metal
+		cp "$DARWIN/system.manifest" "$SYS_MANIFEST"
+		printf '120755\t0\t80\tSystem/Library/Extensions/RedwoodMetal.bundle\t/redwood/lib/RedwoodMetal.bundle\n' >> "$SYS_MANIFEST"
+	fi
+	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$SYS_MANIFEST | tail -1
+	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$SYS_MANIFEST
 	rm -rf sysroot
 fi

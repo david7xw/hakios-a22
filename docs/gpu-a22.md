@@ -42,14 +42,16 @@ The three layers are now in this tree:
   for `panfrost` and passes the DRM requests through as user-client calls. The Mesa patches in
   `tools/mesa/` add the Darwin mmap/BO handling; `tools/mk-mesa.sh` now builds
   `softpipe,panfrost` by default.
-- **Metal for Mali** — still not public. The public `hakios-metal` driver is Adreno/PM4; the
-  Infinix's AIR→NIR→panfrost Metal runtime (`libredwoodair`, `RedwoodMetal.bundle`) is not
-  published. `tools/mesa/air/air-integer-ubo.patch` is kept only as the patch for that private
-  `air_metal.c`; `mk-mesa.sh` does not apply it.
+- **Metal for Mali** — the public common tree's `mtk` branch has the Mali Metal driver
+  (`userland/src/metal`, `userland/src/redwoodmetal.m`) and the AIR→NIR→panfrost compiler
+  (`tools/mesa/air/air_metal.c` built into `libOSMesa` by `panfrost-osmesa-air.patch`). It is
+  now ported here: `libredwoodair.dylib` is a symlink to the panfrost `libOSMesa`, and the
+  kernel already publishes `RedwoodMetal` / `RedwoodMetalDevice`. See `docs/metal-a22.md`.
 
 So the remaining GPU work is not the kernel service any more: it is fixing the panfrost
-blit/readback stalls seen on the A32 (the same Mali-G52) and, for Metal, obtaining the private
-Mali Metal runtime. The GL path is the realistic one for CoreAnimation.
+blit/readback stalls seen on the A32 (the same Mali-G52), and running the now-buildable Metal
+driver on the A22. The GL path is still the safe one for CoreAnimation until the Metal driver
+and the missing QuartzCore `default.metallib` glue are checked on hardware.
 
 ## The panfrost service (test45)
 
@@ -70,7 +72,7 @@ So the path program → IOKit service → Mali is in place, and the client side 
 `tools/mesa/hakios-drm`: Mesa's panfrost opens the service as if it were `/dev/dri/renderD128`.
 Build with `DRIVERS=softpipe,panfrost` (the default) and boot with `mali=1` (and `gl=1` for the
 window server). If the GPU is absent or `OSMESA_SOFTWARE=1` is set, the same library falls back
-to softpipe. Metal is still the private Mali runtime described above.
+to softpipe. The Metal driver and its build are described below and in `docs/metal-a22.md`.
 
 ## The user-space test
 
@@ -103,3 +105,12 @@ mali_job_test: GPU 7402:1000, gpu address 0x1000000, job 1, wait 0, word c0ffee0
 
 So the whole path program → IOKit service → Mali works, with the same job the kernel's
 bring-up runs.
+
+
+
+## Metal
+
+The Mali Metal driver and the AIR→panfrost compiler now build here; the build, the files in
+the images, the boot arguments and the CoreAnimation caveat are in
+[`metal-a22.md`](metal-a22.md). The GL path above is still the safe one for CoreAnimation until
+that driver has been run on the phone.

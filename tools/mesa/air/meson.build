@@ -39,6 +39,11 @@ idep_air = declare_dependency(
 # so it needs libgallium -- which meson has not defined yet when this file is
 # read. Its executable is declared in src/gallium/drivers/freedreno instead,
 # by tools/mesa/air-ir3.patch, next to ir3_compiler.
+#
+# air_metal.c (the library the Metal driver links, air_metal.h) and
+# air_metal_test.c are in src/gallium/drivers/freedreno for the same reason,
+# declared by tools/mesa/air-metal.patch. Neither is in files_libair: they are
+# the consumers of this frontend, not part of it.
 
 air2nir = executable(
   'air2nir',

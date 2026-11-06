@@ -53,14 +53,14 @@ cd "$B"
 # The sources are the archive's with tools/mesa/*.patch on top. When the patches change, a tree that was
 # patched with the earlier ones is of no use (and builds without a word into a library that does not match
 # the rest): the sources are taken from the archive again and everything is built anew, about a minute.
-PATCHES=$(cat "$ROOT"/tools/mesa/*.patch | sha256sum | cut -d' ' -f1)
-if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.hakios-patches 2>/dev/null)" != "$PATCHES" ]; then
+SOURCES=$(cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/air/* "$ROOT"/tools/mesa/hakios-drm/* | sha256sum | cut -d' ' -f1)
+if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.hakios-patches 2>/dev/null)" != "$SOURCES" ]; then
 	[ -f mesa-$VERSION.tar.xz ] || curl -sL --fail -o mesa-$VERSION.tar.xz https://archive.mesa3d.org/mesa-$VERSION.tar.xz
 	echo "$SHA256  mesa-$VERSION.tar.xz" | sha256sum -c --quiet
 	rm -rf mesa-$VERSION build-*
 	tar xJf mesa-$VERSION.tar.xz
 	for p in "$ROOT"/tools/mesa/*.patch; do patch -s --no-backup-if-mismatch -d mesa-$VERSION -p1 < "$p"; done
-	echo "$PATCHES" > mesa-$VERSION/.hakios-patches
+	echo "$SOURCES" > mesa-$VERSION/.hakios-patches
 fi
 # ours, kept in the repository: always the current ones
 rm -rf mesa-$VERSION/src/hakios-drm
@@ -99,8 +99,12 @@ needs_exe_wrapper = true
 INI
 DRIVERS=${DRIVERS:-softpipe,panfrost}
 BUILD=build-${DRIVERS//,/-}
+# panfrost travels in the image that goes into the phone's boot partition: built for size
+# (11 MB instead of 14.5), which costs the GPU nothing -- it is the GPU that draws
+OPT=
+case "$DRIVERS" in *panfrost*) OPT=-Doptimization=s ;; esac
 [ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross.ini --wrap-mode=nofallback \
-	--prefix=/redwood --libdir=lib --buildtype=release -Db_ndebug=true \
+	--prefix=/redwood --libdir=lib --buildtype=release $OPT -Db_ndebug=true \
 	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
 	-Dosmesa=true -Dllvm=disabled -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
 	-Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
@@ -108,11 +112,12 @@ BUILD=build-${DRIVERS//,/-}
 	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
 ninja -C $BUILD > ninja.log
 # air_run draws with a translated Metal shader and reads the pixels back; it is
-# the only way to find out whether the Adreno takes work that did not come from
+# the only way to find out whether the Mali takes work that did not come from
 # the window server. Built only when asked, since it is a test program.
 if [ "${AIR:-}" = 1 ]; then
-	ninja -C $BUILD src/gallium/drivers/freedreno/air_run >> ninja.log
-	cp $BUILD/src/gallium/drivers/freedreno/air_run out/air_run
+	case ",$DRIVERS," in *,panfrost,*) AIR_DIR=panfrost ;; *) AIR_DIR=freedreno ;; esac
+	ninja -C $BUILD src/gallium/drivers/$AIR_DIR/air_run >> ninja.log
+	cp $BUILD/src/gallium/drivers/$AIR_DIR/air_run out/air_run
 	echo "mk-mesa.sh: $B/out/air_run ($(stat -c %s out/air_run) bytes)"
 fi
 
@@ -121,6 +126,6 @@ install_name_tool -id /redwood/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
 nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
 cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
 # (userland/build.sh comes here again when this no longer matches)
-cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > out/built-from
+cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/air/* "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > out/built-from
 echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/out/libOSMesa.8.dylib, $(stat -c %s out/libOSMesa.8.dylib) bytes," \
 	"$(wc -l < out/exported-gl.txt) gl* functions"

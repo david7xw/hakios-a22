@@ -1,7 +1,7 @@
 /*
- * metal_test: what Darwin here believes about Metal, and what it does with the answer.
+ * metal_test: what iOS here believes about Metal, and what it does with the answer.
  *
- * Nothing in Darwin says a word when Metal is missing. A program asks for the system's device with
+ * Nothing in iOS says a word when Metal is missing. A program asks for the system's device with
  * MTLCreateSystemDefaultDevice(); if there is none it gets nil, with no log line, no error and no
  * reason, and whatever the caller does next -- fall back, draw nothing, or stop at an assertion --
  * is all that is ever seen. This prints the whole chain instead, so that a failure somewhere above
@@ -21,7 +21,7 @@
  *      an empty list is an answer given once and kept, silently, for the life of the process.
  *
  * So the question "is there Metal" has exactly one answer, and no capability bit anywhere stands
- * in for it. What Darwin publishes about graphics besides -- MobileGestalt's GraphicsFeatureSetClass
+ * in for it. What iOS publishes about graphics besides -- MobileGestalt's GraphicsFeatureSetClass
  * and GraphicsFeatureSetFallbacks, from the device tree's "graphics-featureset-class" and
  * "graphics-featureset-fallbacks" -- is read by CoreUI and CoreThemeDefinition to choose which
  * compiled artwork to take out of an asset catalog, not by anything that decides how to draw; it
@@ -217,7 +217,7 @@ accelerators(void)
 static void
 gpu_services(void)
 {
-	static const char *const classes[] = { "HakiosGPU", "IOGPU", "AGXAccelerator", "IOAccelerator" };
+	static const char *const classes[] = { "RedwoodGPU", "IOGPU", "AGXAccelerator", "IOAccelerator" };
 	int found = 0;
 
 	for (size_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
@@ -310,62 +310,7 @@ the_device(void)
 	    (int)[device supportsFamily:MTLGPUFamilyApple1], (int)[device supportsFamily:MTLGPUFamilyApple4]);
 }
 
-/*
- * What the device can make (HakiosMetal's step two, docs/metal-plan.md): a buffer written and read back through -contents, a
- * copy, and the library of the OpenGL ES-on-Metal renderer the system carries, its functions by name. Run in a process of its
- * own: a device that cannot do something may end the process that asks.
- */
-#define GL_RENDERER_LIBRARY "/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib"
-
-static void
-device_objects(void)
-{
-	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-	NSError *error = nil;
-
-	if (device == nil) {
-		printf("metal_test:   no device: nothing to ask\n");
-		return;
-	}
-	id<MTLBuffer> buffer = [device newBufferWithLength:65536 options:MTLResourceStorageModeShared];
-	if (buffer == nil) {
-		printf("metal_test:   newBufferWithLength:65536 = nil\n");
-	} else {
-		uint32_t *words = [buffer contents], bad = 0;
-
-		for (uint32_t i = 0; i < 16384; i++) {
-			words[i] = i * 2654435761u;
-		}
-		for (uint32_t i = 0; i < 16384; i++) {
-			bad += words[i] != i * 2654435761u;
-		}
-		printf("metal_test:   a buffer of %lu bytes (class %s, storage mode %lu): written and read back, %u words wrong\n",
-		    (unsigned long)[buffer length], class_getName([(id)buffer class]), (unsigned long)[buffer storageMode], bad);
-	}
-	static const char text[] = "the bytes of a buffer made with newBufferWithBytes:";
-	id<MTLBuffer> copy = [device newBufferWithBytes:text length:sizeof(text) options:0];
-	printf("metal_test:   newBufferWithBytes: %s\n", copy == nil ? "nil" :
-	    memcmp([copy contents], text, sizeof(text)) == 0 ? "a copy of them" : "SOMETHING ELSE");
-
-	id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@GL_RENDERER_LIBRARY] error:&error];
-	if (library == nil) {
-		printf("metal_test:   newLibraryWithURL:%s = nil (%s)\n", GL_RENDERER_LIBRARY, [[error localizedDescription] UTF8String]);
-		return;
-	}
-	NSArray<NSString *> *names = [library functionNames];
-	unsigned kinds[4] = { 0 };
-	for (NSString *name in names) {
-		id<MTLFunction> f = [library newFunctionWithName:name];
-		unsigned long type = f != nil ? [f functionType] : 0;
-
-		kinds[type == MTLFunctionTypeVertex ? 0 : type == MTLFunctionTypeFragment ? 1 : type == MTLFunctionTypeKernel ? 2 : 3]++;
-	}
-	printf("metal_test:   the GL renderer's library (class %s): %lu functions, %u vertex, %u fragment, %u kernel, %u other%s%s\n",
-	    class_getName([(id)library class]), (unsigned long)[names count], kinds[0], kinds[1], kinds[2], kinds[3],
-	    [names count] ? "; the first is " : "", [names count] ? [names[0] UTF8String] : "");
-}
-
-/* What Darwin publishes about graphics besides: artwork, not rendering (see the note above). */
+/* What iOS publishes about graphics besides: artwork, not rendering (see the note above). */
 static void
 gestalt(void)
 {
@@ -402,7 +347,7 @@ static NSDictionary *coreimage_options;
 static int coreimage_over_eagl;
 
 /*
- * The way back for CoreImage, if there is one. Darwin 16.5's CoreImage carries a whole second back
+ * The way back for CoreImage, if there is one. iOS 16.5's CoreImage carries a whole second back
  * end on OpenGL ES -- CI::GLContext, CI::GLMainProgram, CI::GLTextureManager beside the
  * CI::MetalContext family -- it is linked against OpenGLES, it compiles its shaders as GLSL (not
  * AIR), and CIGLIsUsable() is compiled to "return 1". The public way in is
@@ -411,7 +356,7 @@ static int coreimage_over_eagl;
  * an EAGLContext (which on an image built with GL=1, on a phone with gpu=1, is our Mesa behind
  * src/eagl.c) and hand it over.
  */
-#define HAKIOS_GL      "/redwood/lib/libhakios.gl.dylib"
+#define REDWOOD_GL      "/redwood/lib/libredwood-gl.dylib"
 
 static EAGLContext *
 make_eagl(void)
@@ -419,15 +364,15 @@ make_eagl(void)
 	EAGLContext *gl;
 
 	/*
-	 * Our OpenGL ES has to be put behind EAGLContext in THIS process first. libhakios.dylib does
+	 * Our OpenGL ES has to be put behind EAGLContext in THIS process first. libredwood.dylib does
 	 * it only for backboardd (src/inject.c, opengl_es(), which is called for that name alone), and
 	 * the way it does it -- replacing methods of EAGLContext through the ObjC runtime -- is local
 	 * to a process. The library installs itself from a constructor, so loading it is enough; what
-	 * it replaced it says itself in lines "hakios-gl:". Without this, EAGLContext here would be
-	 * Darwin's own, which is AppleMetalGLRenderer over Metal -- the thing that is missing.
+	 * it replaced it says itself in lines "redwood-gl:". Without this, EAGLContext here would be
+	 * iOS's own, which is AppleMetalGLRenderer over Metal -- the thing that is missing.
 	 */
-	if (access(HAKIOS_GL, R_OK) != 0) {
-		printf("metal_test:   %s is not in this image: build it with GL=1\n", HAKIOS_GL);
+	if (access(REDWOOD_GL, R_OK) != 0) {
+		printf("metal_test:   %s is not in this image: build it with GL=1\n", REDWOOD_GL);
 		return nil;
 	}
 	/*
@@ -440,11 +385,11 @@ make_eagl(void)
 		setenv("OSMESA_SOFTWARE", "1", 1);
 		printf("metal_test:   OSMESA_SOFTWARE=1: Mesa's software driver, not the GPU\n");
 	}
-	if (dlopen(HAKIOS_GL, RTLD_NOW) == NULL) {
-		printf("metal_test:   %s: %s\n", HAKIOS_GL, dlerror());
+	if (dlopen(REDWOOD_GL, RTLD_NOW) == NULL) {
+		printf("metal_test:   %s: %s\n", REDWOOD_GL, dlerror());
 		return nil;
 	}
-	printf("metal_test:   %s loaded; EAGLContext is ours now\n", HAKIOS_GL);
+	printf("metal_test:   %s loaded; EAGLContext is ours now\n", REDWOOD_GL);
 	gl = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
 
 	if (gl == nil) {
@@ -493,7 +438,7 @@ coreimage(void)
 			return;
 		}
 		/*
-		 * Which of CoreImage's two backends the default context took. Darwin userland 16.5 has both:
+		 * Which of CoreImage's two backends the default context took. iOS 16.5 has both:
 		 * CI::GLContext (with CI::GLMainProgram, CI::GLTextureManager) and CI::MetalContext
 		 * (with CI::MetalDAG, CI::MetalKernel); -[CIContext initWithOptions:] chooses between
 		 * them by CIGLIsUsable(). -isOpenGLBased and -device are private, so they are asked for
@@ -556,59 +501,6 @@ coreimage(void)
 	}
 }
 
-/*
- * Blits through Metal's own API, as any program would ask for them: a queue, a command buffer, a blit encoder, copy and
- * fill, commit, and the bytes checked when it is done. With hakios-metal and gpu=1 the GPU's command processor does the
- * work (HakiosMetal.m, hakios-metal's CP_MEMCPY and CP_MEM_WRITE); without, the queue makes no command buffers and this says so.
- */
-static void
-blits(void)
-{
-	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-	const NSUInteger n = 1 << 20;
-
-	if (device == nil) {
-		printf("metal_test:   no device\n");
-		return;
-	}
-	id<MTLCommandQueue> queue = [device newCommandQueue];
-	id<MTLBuffer> a = [device newBufferWithLength:n options:MTLResourceStorageModeShared];
-	id<MTLBuffer> b = [device newBufferWithLength:n options:MTLResourceStorageModeShared];
-	id<MTLCommandBuffer> cb = [queue commandBuffer];
-
-	printf("metal_test:   queue %s, buffers at GPU addresses 0x%llx and 0x%llx, command buffer %s\n", queue ? "made" : "nil",
-	    (unsigned long long)a.gpuAddress, (unsigned long long)b.gpuAddress, cb ? object_getClassName(cb) : "nil");
-	if (queue == nil || a == nil || b == nil || cb == nil) {
-		printf("metal_test:   no blits: the device has no GPU queue (gpu=1, and the plug-in built with hakios-metal)\n");
-		return;
-	}
-	uint32_t *pa = a.contents;
-	for (NSUInteger i = 0; i < n / 4; i++) {
-		pa[i] = (uint32_t)(i * 2654435761u);
-	}
-	memset(b.contents, 0, n);
-	__block int handled = 0;
-	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-	[blit copyFromBuffer:a sourceOffset:4096 toBuffer:b destinationOffset:8192 size:500000];
-	[blit fillBuffer:b range:NSMakeRange(600000, 4096) value:0xa5];
-	[blit endEncoding];
-	[cb addCompletedHandler:^(id<MTLCommandBuffer> done) { handled = done.status == MTLCommandBufferStatusCompleted ? 1 : -1; }];
-	uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-	[cb commit];
-	[cb waitUntilCompleted];
-	uint64_t t1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-	uint8_t *pb = b.contents;
-	int same = memcmp(pb + 8192, (uint8_t *)pa + 4096, 500000) == 0, filled = 1, edges = pb[8191] == 0 && pb[8192 + 500000] == 0;
-	for (NSUInteger i = 600000; i < 604096; i++) {
-		filled = filled && pb[i] == 0xa5;
-	}
-	printf("metal_test:   blits: status %lu%s, handler %s, copy %s, fill %s, edges %s, %llu us\n", (unsigned long)cb.status,
-	    cb.error ? [[NSString stringWithFormat:@" (%@)", cb.error.localizedDescription] UTF8String] : "",
-	    handled == 1 ? "ran" : handled ? "saw an error" : "DID NOT RUN", same ? "ok" : "WRONG", filled ? "ok" : "WRONG",
-	    edges ? "untouched" : "CHANGED", (unsigned long long)((t1 - t0) / 1000));
-	printf("metal_test:   blits %s\n", cb.status == MTLCommandBufferStatusCompleted && handled == 1 && same && filled && edges ? "WORK" : "FAILED");
-}
-
 int
 main(int argc, char **argv)
 {
@@ -640,10 +532,6 @@ main(int argc, char **argv)
 			coreimage();
 		} else if (strcmp(argv[1], "plugins") == 0) {
 			plugins();
-		} else if (strcmp(argv[1], "objects") == 0) {
-			device_objects();
-		} else if (strcmp(argv[1], "blits") == 0) {
-			blits();
 		} else {
 			printf("metal_test: no such question: %s\n", argv[1]);
 			return 2;
@@ -657,9 +545,7 @@ main(int argc, char **argv)
 	gpu_services();
 	printf("metal_test: the device a program gets\n");
 	the_device();
-	in_a_new_process("what the device makes: buffers, a library", "objects", 60);
-	in_a_new_process("blits through Metal: copy and fill, done by the GPU", "blits", 60);
-	printf("metal_test: what Darwin publishes about graphics (artwork, not rendering)\n");
+	printf("metal_test: what iOS publishes about graphics (artwork, not rendering)\n");
 	gestalt();
 	printf("metal_test: CoreImage, which has a path without Metal\n");
 	/*

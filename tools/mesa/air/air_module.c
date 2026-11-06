@@ -1289,6 +1289,45 @@ read_instruction(struct reader *r, const struct air_bs_entry *e, struct air_bloc
          return fail(r, "br of %u operands", e->num_ops);
       }
       break;
+   case FUNC_CODE_INST_SWITCH: {
+      /* [ type of the condition, condition, default block,
+       *   (case constant, block)* ]
+       *
+       * The condition is a RELATIVE value number and each case constant is an
+       * ABSOLUTE one, because that is what the writer does -- pushValue for
+       * the condition, getValueID for each case value. Reading them the same
+       * way gives the wrong constant for every case in any function that has
+       * more than a handful of values, which is every function here.
+       *
+       * The blocks are block numbers, as br's are, not value numbers.
+       */
+      if (e->num_ops < 3 || (e->num_ops - 3) % 2)
+         return fail(r, "a switch of %u operands", e->num_ops);
+      unsigned ty = take(&rc);
+      /* LLVM 3.0 wrote switches over ranges, with the case count and a bit
+       * width packed into the first operand under this magic instead of a type
+       * id. Nothing Apple's compiler emits uses it, and reading it as a type
+       * would silently take the wrong path, so it is named and refused.
+       */
+      if ((ty >> 16) == 0x4B5)
+         return fail(r, "a switch in LLVM 3.0's range form (SWITCH_INST_MAGIC)");
+      unsigned cond = take_value(r, &rc);
+      unsigned deflt = take(&rc);
+      unsigned n = (e->num_ops - 3) / 2;
+      in = new_inst(r, AIR_OP_SWITCH, NULL, 1 + n);
+      in->num_targets = 1 + n;
+      in->target_ids = ralloc_array(m, unsigned, 1 + n);
+      /* target 0 and operand 0 are the default edge and the condition; the
+       * cases follow, so case k is operand k+1 and target k+1
+       */
+      in->target_ids[0] = deflt;
+      in->operand_ids[0] = cond;
+      for (unsigned k = 0; k < n; k++) {
+         in->operand_ids[1 + k] = take(&rc);
+         in->target_ids[1 + k] = take(&rc);
+      }
+      break;
+   }
    case FUNC_CODE_INST_UNREACHABLE:
       in = new_inst(r, AIR_OP_UNREACHABLE, NULL, 0);
       break;

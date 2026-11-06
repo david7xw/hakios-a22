@@ -21,6 +21,7 @@ the end of `userdata`) and the kernel reads it off the eMMC as it needs it.
 | touch | partial | STM FTS5CU56A or Melfas MSS100 on I2C6 at 0x49/0x48, bit-banged on GPIO89/90 (`kernel/bsd/dev/hakios.fts.c`); the rails are power-cycled and both controllers are initialised (Melfas: normal touch mode + interrupt trigger, 1-based ids), needs a run to confirm on the phone (`docs/touch-a22.md`) |
 | buttons | works | power and volume up/down (`kernel/bsd/dev/hakios.mtkkeys.c`) |
 | GPU | partial | Mali-G52 r1p0 brought up (step 6/6), the panfrost service `RedwoodMali` running with the syncobj/`submit_ex`/cache-clean interface, Mesa panfrost + the `hakios-drm` shim building by default; the A32's blit/readback stall is still open, so CoreAnimation may stay in software (`docs/gpu-a22.md`) |
+| Metal | builds | the public common tree's Mali Metal driver (`userland/src/metal`, `userland/src/redwoodmetal.m`) with the AIR→panfrost compiler in `libredwoodair.dylib`; `GL=1 METAL=1 SYSTEM=1 userland/build.sh` builds `RedwoodMetal.bundle` and the test programs. Built, not yet run on the phone (`docs/metal-a22.md`) |
 | CPU | works | 4 cores; A75 at 1999 MHz and A55 at 1699 MHz with `mtk_cpufreq=3` (`kernel/bsd/dev/hakios.mtkcpufreq.c`); the inherited A32 ten-minute run stayed there (`docs/stability-a22.md`), not yet repeated on the A22 |
 | battery | works | MT6358 `BATADC` (voltage, 3:1 divider) and `CHRDET`, `battery=2`; temperature and current are still placeholders |
 | sensors | partial | the SCP sensor hub runs and the accelerometer streams (`scp_step=6`, `kernel/bsd/dev/hakios.scp.c`); turning the samples into screen rotation is still user-space work |
@@ -42,10 +43,15 @@ The GPU itself works. The panfrost service in `kernel/iokit/Kernel/hakios.mali.c
 the A32 tree's current one (syncobjs, `submit_ex`, cache cleaning, the newer GET_PARAMs), and
 `tools/mesa/hakios-drm` speaks panfrost as well as msm, so Mesa built with
 `DRIVERS=softpipe,panfrost` reaches `RedwoodMali`. What is still open is the A32's
-blit/readback stall, not the interface: see `docs/gpu-a22.md`. Metal is separate: the public
-`hakios-metal` is Adreno/PM4, and the Mali Metal runtime (`libredwoodair`,
-`RedwoodMetal.bundle`) is private, so Metal cannot be built from this tree. Leaving `mali=1`
-on changes nothing else: the GPU stays powered and tested.
+blit/readback stall, not the interface: see `docs/gpu-a22.md`. Metal is now buildable too: the
+public common tree's `mtk` branch carries the Mali Metal driver (`userland/src/metal`,
+`userland/src/redwoodmetal.m`) and the AIR→panfrost compiler (`tools/mesa/air`,
+`panfrost-osmesa-air.patch`), and the A22's kernel already publishes `RedwoodMetal` /
+`RedwoodMetalDevice`. `GL=1 METAL=1 SYSTEM=1 userland/build.sh` builds it; see
+`docs/metal-a22.md` for what goes where and the boot arguments. It has not been run on a
+phone yet. The separate public `hakios-metal` on the `main` branch remains the Adreno/PM4
+driver and is not this phone's GPU. Leaving `mali=1` on changes nothing else: the GPU stays
+powered and tested.
 
 ## What is here
 
@@ -98,8 +104,11 @@ cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1 mtk_cpufreq=3 battery=2
 `gl=1` additionally lets the window server use the Mesa/panfrost OpenGL ES library (the
 library is only built with `GL=1` in `userland/build.sh`). Add it only after the library is in
 the image; the A32's blit/readback stall is still open, so CoreAnimation may fall back to
-software even then. `metal=1`/`metal_plugin=1` only make sense with a Mali Metal runtime,
-which this tree does not carry.
+software even then. `metal=1` lets a process publish the Metal discovery properties
+(`metal_props on`); `metal_plugin=1` publishes them before launchd starts, which is not the
+default yet because CoreAnimation then needs the QuartzCore `default.metallib` and the
+`camtl=1` glue (`docs/metal-a22.md`). With `mali=1 gl=1 metal=1`, `rc.jobs.metalprops`
+checks the Metal driver without disturbing the window server.
 
 `boot` boots Android by default. To ask for one XNU run, from Android:
 

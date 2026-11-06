@@ -10,6 +10,8 @@
  *   air2nir --ll FILE [FUNCTION]     print what the bitcode reader read, as LLVM assembly
  *   air2nir --list FILE.metallib     the functions of a container
  *   air2nir --report FILE...         one line per module, for tools/air/corpus.py
+ *   air2nir --interface FILE [FUNC]  what the shader expects of the runtime
+ *                                    (air_shader_info), key=value per line
  *
  * FILE is a .metallib (then FUNCTION picks one; without it, every function)
  * or one module's bitcode, wrapped or not. --report forks for every module,
@@ -324,8 +326,15 @@ eval_module(const struct module_ref *mod)
    struct eval_state st = { .info = &info };
    nir_shader_intrinsics_pass(nir, fold_buffer_loads, nir_metadata_control_flow, &st);
 
-   /* fold what the loads made foldable, and nothing else: no algebraic
-    * rewriting, so the arithmetic is IEEE and comparable with LLVM's
+   /* Fold what the loads made foldable, and nothing else: no algebraic
+    * rewriting, so the arithmetic is IEEE and comparable with LLVM's.
+    *
+    * Control flow is simplified, though, and that is not a rewriting of any
+    * arithmetic: once a comparison has folded, the branch under it is dead and
+    * the phi below it has one live source. Without this, 20 of the corpus's
+    * library functions had no folded value at all -- every one of them is
+    * straight-line arithmetic behind one `if` -- and a shader with a branch
+    * could never be compared against LLVM, which has no such trouble.
     */
    bool progress;
    unsigned rounds = 0;
@@ -335,6 +344,8 @@ eval_module(const struct module_ref *mod)
       NIR_PASS(progress, nir, nir_opt_constant_folding);
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
+      NIR_PASS(progress, nir, nir_opt_dead_cf);
+      NIR_PASS(progress, nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
    } while (progress && ++rounds < 16);
 
    printf("eval: the outputs this shader stores:\n");
@@ -367,6 +378,74 @@ one_line(const char *s, FILE *fp)
 {
    for (; *s; s++)
       fputc(*s == '\n' || *s == '\t' ? ' ' : *s, fp);
+}
+
+/* --interface: what air_shader_info says the shader expects of the runtime,
+ * which nir_print_shader cannot show because it is not in the NIR. Its own
+ * mode rather than a line added to the others: the report's lines are parsed
+ * by tools/air/corpus.py and the translated NIR by tools/air/fbfetchcheck.py,
+ * and a field added to either would move numbers that are a baseline.
+ *
+ * One `key=value` per line, tab-separated, so a check can read it.
+ */
+static int
+interface_module(const struct module_ref *mod)
+{
+   void *ctx = ralloc_context(NULL);
+   const char *err = NULL;
+   struct air_constant_value *fc;
+   unsigned num_fc = air_module_function_constants(ctx, mod->bitcode, mod->size, &fc);
+   struct air_to_nir_options options = { .constants = fc, .num_constants = num_fc,
+                                        .library_wrapper = library_wrapper };
+   struct air_shader_info info;
+   nir_shader *nir = air_to_nir(ctx, mod->bitcode, mod->size, NULL, &options,
+                                &default_options, &info, &err);
+   if (!nir) {
+      fprintf(stderr, "air2nir: %s: %s\n", mod->name, err);
+      ralloc_free(ctx);
+      return 1;
+   }
+
+   printf("entry=%s\tstage=%s\n", info.entry_point, gl_shader_stage_name(info.stage));
+   printf("inputs_read=0x%" PRIx64 "\n", (uint64_t)nir->info.inputs_read);
+   printf("vertex_attributes=%u\tvertex_attributes_read=0x%x\n",
+          info.num_vertex_attributes, info.vertex_attributes_read);
+   for (unsigned i = 0; i < info.num_vertex_attributes; i++) {
+      const struct air_vertex_attribute *a = &info.vertex_attributes[i];
+      printf("attribute\tindex=%u\tlocation=%s\tdriver_location=%d\tcomponents=%u"
+             "\tbits=%u\ttype=%s\tname=%s\tdecl=%s\tused=%s\tfc=%s\n",
+             a->index, gl_vert_attrib_name((gl_vert_attrib)a->location),
+             a->driver_location == ~0u ? -1 : (int)a->driver_location, a->components,
+             a->bit_size,
+             a->base_type == AIR_ATTRIB_FLOAT ? "float" :
+             a->base_type == AIR_ATTRIB_UINT ? "uint" : "int",
+             a->name ? a->name : "-", a->type_name ? a->type_name : "-",
+             a->used ? "yes" : "no",
+             a->function_constant ? a->function_constant : "-");
+   }
+   for (unsigned i = 0; i < info.num_varyings; i++)
+      printf("varying\tslot=%u\tcomponents=%u\tname=%s\n", info.varyings[i].slot,
+             info.varyings[i].components,
+             info.varyings[i].name ? info.varyings[i].name : "-");
+   for (unsigned i = 0; i < info.num_resources; i++) {
+      const struct air_resource *r = &info.resources[i];
+      /* set and id are the Metal name of an argument-buffer member, which is
+       * the one case where index is this frontend's number and not Metal's --
+       * so a check can see both halves of the mapping and not just the one it
+       * would have guessed (tools/air/argbufcheck.py)
+       */
+      printf("resource\tkind=%d\tindex=%u\tsize=%u\tname=%s\tset=%d\tid=%d\n",
+             r->kind, r->index, r->size, r->name ? r->name : "-",
+             r->argbuf_set == ~0u ? -1 : (int)r->argbuf_set,
+             r->argbuf_id == ~0u ? -1 : (int)r->argbuf_id);
+   }
+   for (unsigned i = 0; i < info.num_notes; i++) {
+      fputs("note\t", stdout);
+      one_line(info.notes[i], stdout);
+      fputc('\n', stdout);
+   }
+   ralloc_free(ctx);
+   return 0;
 }
 
 /* tools/air/corpus.py reads these lines: tab-separated key=value */
@@ -423,7 +502,18 @@ report_one(const struct module_ref *mod)
             instrs++;
       }
    }
-   printf("\ttranslate=ok\tnir_instrs=%u\n", instrs);
+   printf("\ttranslate=ok\tnir_instrs=%u", instrs);
+   /* What was translated with a caveat: the shader was accepted and something
+    * other than exactly what it asked for was done (air_shader_info.notes).
+    * On the report line rather than on stderr, because the report is the only
+    * output anything parses, and a caveat nobody can count is the silence this
+    * channel exists to end.
+    */
+   for (unsigned i = 0; i < info.num_notes; i++) {
+      fputs(i ? ";" : "\tnotes=", stdout);
+      one_line(info.notes[i], stdout);
+   }
+   printf("\n");
    ralloc_free(nir);
    ralloc_free(ctx);
 }
@@ -431,7 +521,7 @@ report_one(const struct module_ref *mod)
 int
 main(int argc, char **argv)
 {
-   enum { TRANSLATE, LL, LIST, REPORT, EVAL } mode = TRANSLATE;
+   enum { TRANSLATE, LL, LIST, REPORT, EVAL, INTERFACE } mode = TRANSLATE;
    int i = 1;
    while (i < argc && !strcmp(argv[i], "--library"))
       library_wrapper = true, i++;
@@ -443,9 +533,12 @@ main(int argc, char **argv)
       mode = REPORT, i++;
    else if (i < argc && !strcmp(argv[i], "--eval"))
       mode = EVAL, i++;
+   else if (i < argc && !strcmp(argv[i], "--interface"))
+      mode = INTERFACE, i++;
    if (i >= argc) {
       fprintf(stderr,
-              "usage: air2nir [--library] [--ll | --list | --report | --eval] "
+              "usage: air2nir [--library] "
+              "[--ll | --list | --report | --eval | --interface] "
               "FILE [FUNCTION]\n");
       return 2;
    }
@@ -490,6 +583,10 @@ main(int argc, char **argv)
       const char *err = NULL;
       if (mode == EVAL) {
          status |= eval_module(&mods[k]);
+         continue;
+      }
+      if (mode == INTERFACE) {
+         status |= interface_module(&mods[k]);
          continue;
       }
       if (mode == LIST) {

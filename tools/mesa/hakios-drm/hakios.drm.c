@@ -26,6 +26,19 @@ static int is_panfrost;
 
 static io_connect_t connection;
 static int connection_fd = -1;
+static uint64_t last_seq;
+
+/*
+ * Counters read by air_metal.c (rwa_submit_profile) and written by
+ * panfrost-redwood-perf.patch (pan_shader.c). Defined here, in an object built with the
+ * shim's default visibility, rather than in air_metal.c: the target sets
+ * -fvisibility=hidden, which would make them private to that object and leave panfrost's
+ * static library with an undefined reference.
+ */
+__attribute__((visibility("default")))
+uint64_t redwood_pan_submit_ns, redwood_pan_submits, redwood_pan_blend_compiles;
+__attribute__((visibility("default")))
+uint64_t redwood_pan_variant_compiles, redwood_pan_variant_ns;
 
 int
 drmOpenWithType(const char *name, const char *busid, int type)
@@ -106,15 +119,44 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	 * said to be signalled (see below). The Adreno service runs its jobs before returning.
 	 */
 	if (is_panfrost && number == 0x40) {
-		struct hakios_wait wait = { .seq = *(uint64_t *)arg, .timeout_ns = 2000000000 };
+		uint64_t seq = *(uint64_t *)arg;
+		struct hakios_wait wait = { .seq = seq, .timeout_ns = 2000000000 };
 
 		error = call(HAKIOS_WAIT, &wait, sizeof(wait));
 		if (error != 0) {
 			errno = error;
 			return -1;
 		}
+		last_seq = seq;
 	}
 	return 0;
+}
+
+/*
+ * What air_metal.c asks of libdrm for its Metal fence accounting. The panfrost submit above
+ * already waits for the job, so the sequence number is only reported, not waited for again;
+ * a surface's sequence is not exposed by this kernel, and 0 means "nothing to wait for".
+ */
+uint64_t
+redwood_drm_last_seq(void)
+{
+	return last_seq;
+}
+
+int
+redwood_drm_surface_seq(uint32_t surface, uint64_t seq)
+{
+	(void)surface;
+	(void)seq;
+	return 0;
+}
+
+int
+redwood_drm_wait_seq(uint64_t seq, int64_t timeout_ns)
+{
+	struct hakios_wait wait = { .seq = seq, .timeout_ns = timeout_ns };
+
+	return seq == 0 ? 0 : call(HAKIOS_WAIT, &wait, sizeof(wait));
 }
 
 int
