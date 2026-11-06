@@ -96,8 +96,10 @@ cpus=4 fbscale=2 touchscreen=3 buttons=2 mali=1 mtk_cpufreq=3 battery=2
 ```
 
 `gl=1` additionally lets the window server use the Mesa/panfrost OpenGL ES library (the
-library is only built with `GL=1` in `userland/build.sh`). `metal=1`/`metal_plugin=1` only make
-sense with a Mali Metal runtime, which this tree does not carry.
+library is only built with `GL=1` in `userland/build.sh`). Add it only after the library is in
+the image; the A32's blit/readback stall is still open, so CoreAnimation may fall back to
+software even then. `metal=1`/`metal_plugin=1` only make sense with a Mali Metal runtime,
+which this tree does not carry.
 
 `boot` boots Android by default. To ask for one XNU run, from Android:
 

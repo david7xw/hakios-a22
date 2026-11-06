@@ -416,3 +416,16 @@
    ],
    name_prefix : host_machine.system() == 'windows' ? '' : [],  # otherwise mingw will create libosmesa.dll
    soversion : host_machine.system() == 'windows' ? '' : '8',
+--- a/src/panfrost/lib/kmod/meson.build
++++ b/src/panfrost/lib/kmod/meson.build
+@@ -7,6 +7,10 @@
+   'panthor_kmod.c',
+ )
+ 
++if host_machine.system() == 'darwin' and not with_gallium_freedreno
++  libpankmod_lib_files += files('../../../hakios-drm/hakios.drm.c')
++endif
++
+ libpankmod_lib = static_library(
+   'pankmod_lib',
+   [libpankmod_lib_files],

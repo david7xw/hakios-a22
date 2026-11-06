@@ -112,7 +112,10 @@ autoconf automake` and a theos install with the Linux cctools and `iPhoneOS16.5.
 `make images` is the long step: it writes `userland/system.apfs`, the 2.5 GB root filesystem
 that goes into the `xnusys` partition, and `userland/root.apfs`, the small boot volume that
 travels in `boot`. It takes the iOS files from `sysimage/`, so it cannot run before the IPSW
-has been unpacked.
+has been unpacked. `GL=1 make images` also builds Mesa (the panfrost driver by default), which
+needs `meson`, `ninja`, `bison`, `flex`, and a working `python3 -m venv` (the `python3-venv`
+package on Ubuntu); `tools/mk-mesa.sh` keeps its Python packages in
+`xnu-deps/build/mesa/venv`.
 
 ## Put it on the phone
 
