@@ -214,10 +214,16 @@ pmic_write(uint32_t reg, uint32_t value)
 }
 
 /*
- * The touch screen's analog rail is VCAMA2: `tsp_avdd_ldo` in the device tree, on at boot for
- * Linux, but this kernel has to ask for it. GPIO4 (above) is its 1.8 V I/O rail; with only that
- * one on the chip answers on I2C but nothing reaches the analog front end, so no finger is
- * ever seen. Set the voltage to the 3.0 V the device tree asks for and enable it.
+ * The touch screen's rails. GPIO4 (above) is its 1.8 V I/O rail; the analog rail is VCAMA2,
+ * `tsp_avdd_ldo` in the device tree, on at boot for Linux, but this kernel has to ask for it.
+ * With only GPIO4 on the chip answers on I2C but nothing reaches the analog front end, so no
+ * finger is ever seen.
+ *
+ * Both are also the only reset the controller has (the device tree gives the Melfas and the STM
+ * no reset GPIO). Android leaves the chip powered and in its low-power/AOT mode; switching the
+ * rails off and on again is what returns it to its power-on state, and the STM needs it as much
+ * as the Melfas. The order is Samsung's (sec_input_power): analog off, 4 ms, I/O off; on, I/O
+ * first, 1 ms, analog. Then the chip's own power-on delay.
  */
 static void
 touch_power_on(void)
@@ -225,7 +231,7 @@ touch_power_on(void)
 	uint32_t con0 = 0, ana = 0, op = 0;
 
 	if (pwrap == 0) {
-		printf("fts: no pwrap, cannot enable vcama2\n");
+		printf("fts: no pwrap, cannot power-cycle the touch rails\n");
 		return;
 	}
 	if (!pmic_read(MT6358_VCAMA2_CON0, &con0) || !pmic_read(MT6358_VCAMA2_ANA_CON0, &ana)) {
@@ -234,11 +240,20 @@ touch_power_on(void)
 	}
 	printf("fts: vcama2 before: con0 %04x ana %04x\n", con0, ana);
 
+	/* Both rails down: the controller's power-on reset. */
+	(void)pmic_write(MT6358_VCAMA2_CON0, con0 & ~1u);
+	sleep_us(4000);
+	wr(gpio, DOUT_CLR(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
+	sleep_us(20000);
+
+	/* Both up again, I/O first, then the 3.0 V the device tree asks for. */
+	wr(gpio, DOUT_SET(PIN_BANK(PIN_TSP_EN)), PIN_BIT(PIN_TSP_EN));
+	sleep_us(1000);
 	(void)pmic_write(MT6358_VCAMA2_ANA_CON0, (ana & ~0xf00u) | ((uint32_t)VCAMA2_VOSEL_3000MV << 8));
 	(void)pmic_read(MT6358_VCAMA2_OP_EN, &op);
 	(void)pmic_write(MT6358_VCAMA2_OP_EN, op | 1u);
 	(void)pmic_write(MT6358_VCAMA2_CON0, con0 | 1u);
-	sleep_us(2000);
+	sleep_us(100000);
 
 	con0 = ana = 0;
 	(void)pmic_read(MT6358_VCAMA2_CON0, &con0);
@@ -546,14 +561,15 @@ scale(uint32_t value, uint32_t maximum)
 	return (uint32_t)(((uint64_t)value * 65535u + maximum / 2) / maximum);
 }
 
+/*
+ * One touch from either controller. The STM and the Melfas share the action values
+ * (1 press, 2 move, 3 release) but not the finger numbering: the STM reports 0..9, the
+ * Melfas 1..10 (Linux's melfas_ts_coordinate_event does `t_id = tid - 1`), which the caller
+ * has already made 0..9.
+ */
 static void
-coordinate_event(const uint8_t *event, uint32_t *events, uint32_t *touches)
+post_touch(uint32_t id, uint32_t action, uint32_t x, uint32_t y, uint32_t *events, uint32_t *touches)
 {
-	uint32_t id = (event[0] >> 2) & 0xf;
-	uint32_t action = (event[0] >> 6) & 3;
-	uint32_t x = ((uint32_t)event[1] << 4) | (event[3] >> 4);
-	uint32_t y = ((uint32_t)event[2] << 4) | (event[3] & 0xf);
-
 	if (id >= FTS_MAX_FINGERS || action == 0) {
 		return;
 	}
@@ -602,6 +618,126 @@ coordinate_event(const uint8_t *event, uint32_t *events, uint32_t *touches)
 }
 
 static void
+coordinate_event(const uint8_t *event, uint32_t *events, uint32_t *touches)
+{
+	uint32_t id = (event[0] >> 2) & 0xf;
+	uint32_t action = (event[0] >> 6) & 3;
+	uint32_t x = ((uint32_t)event[1] << 4) | (event[3] >> 4);
+	uint32_t y = ((uint32_t)event[2] << 4) | (event[3] & 0xf);
+
+	post_touch(id, action, x, y, events, touches);
+}
+
+/* ---- Melfas MSS100, as Linux's drivers/input/sec_input/melfas drives it ------------------- */
+
+#define MELFAS_ADDRESS          0x48
+#define MELFAS_R0_INFO          0x01
+#define MELFAS_R0_EVENT         0x02
+#define MELFAS_R0_CTRL          0x06
+#define MELFAS_INFO_PRODUCT     0x00
+#define MELFAS_INFO_RESOLUTION  0x10
+#define MELFAS_INFO_VERSION     0x20
+#define MELFAS_INFO_NODE_X      0x14
+#define MELFAS_INFO_NODE_Y      0x15
+#define MELFAS_EVENT_PACKET     0x10
+#define MELFAS_EVENT_DATA       0x11
+#define MELFAS_CTRL_STATUS      0x00
+#define MELFAS_CTRL_TRIGGER     0x11
+#define MELFAS_CTRL_POWER       0x13
+#define MELFAS_TRIGGER_INTR     1
+#define MELFAS_MODE_TOUCH       0
+#define MELFAS_EVENT_SIZE       16
+#define MELFAS_MAX_FINGERS      10
+
+static bool
+melfas_read(uint8_t sub, uint8_t *data, unsigned length)
+{
+	uint8_t command[2] = { MELFAS_R0_INFO, sub };
+
+	return i2c_reg_read(MELFAS_ADDRESS, command, 2, data, length);
+}
+
+static bool
+melfas_read_event(uint8_t sub, uint8_t *data, unsigned length)
+{
+	uint8_t command[2] = { MELFAS_R0_EVENT, sub };
+
+	return i2c_reg_read(MELFAS_ADDRESS, command, 2, data, length);
+}
+
+static bool
+melfas_read_control(uint8_t sub, uint8_t *data, unsigned length)
+{
+	uint8_t command[2] = { MELFAS_R0_CTRL, sub };
+
+	return i2c_reg_read(MELFAS_ADDRESS, command, 2, data, length);
+}
+
+static bool
+melfas_write_control(uint8_t sub, uint8_t value)
+{
+	uint8_t command[2] = { MELFAS_R0_CTRL, sub };
+
+	return i2c_reg_write(MELFAS_ADDRESS, command, 2, &value, 1);
+}
+
+/*
+ * The controller's mode register: 0 is normal touch, 1 is low power (AOT only). Android leaves
+ * the chip in 1 when the screen goes off, and a warm reboot does not reset it, so a run can
+ * start with the sense engine asleep. Linux's melfas_ts_set_lowpowermode writes the value and
+ * reads it back until it matches; do the same, and say what was there.
+ */
+static bool
+melfas_set_mode(uint8_t mode)
+{
+	uint8_t now = 0xff;
+
+	if (melfas_read_control(MELFAS_CTRL_POWER, &now, 1)) {
+		printf("melfas: power state before %02x (want %02x)\n", now, mode);
+		if (now == mode) {
+			return true;
+		}
+	}
+
+	for (unsigned attempt = 0; attempt < 10; attempt++) {
+		if (!melfas_write_control(MELFAS_CTRL_POWER, mode)) {
+			continue;
+		}
+		sleep_us(20000);
+		now = 0xff;
+		if (melfas_read_control(MELFAS_CTRL_POWER, &now, 1) && now == mode) {
+			return true;
+		}
+	}
+	printf("melfas: power state would not change (read %02x, want %02x)\n", now, mode);
+	return false;
+}
+
+/* The event engine: 1 is INTR (what the A22's firmware uses), 0 None, 2 Register. */
+static bool
+melfas_set_trigger(uint8_t type)
+{
+	uint8_t now = 0xff;
+
+	if (melfas_read_control(MELFAS_CTRL_TRIGGER, &now, 1)) {
+		printf("melfas: event trigger before %02x (want %02x)\n", now, type);
+		if (now == type) {
+			return true;
+		}
+	}
+	if (!melfas_write_control(MELFAS_CTRL_TRIGGER, type)) {
+		return false;
+	}
+	sleep_us(20000);
+	now = 0xff;
+	if (melfas_read_control(MELFAS_CTRL_TRIGGER, &now, 1) && now == type) {
+		return true;
+	}
+	printf("melfas: event trigger would not change (read %02x, want %02x)\n", now, type);
+	return false;
+}
+
+static void
 fts_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	uint8_t data[16];
@@ -640,7 +776,6 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 	i2c_recover();
 
 	bool is_melfas = false;
-	uint8_t melfas_event_size = 6;
 
 	{
 		memset(data, 0, sizeof(data));
@@ -649,19 +784,45 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 			have_device_id = true;
 			printf("fts: detected STM FTS5CU56A at 0x%02x\n", FTS_ADDRESS);
 		} else {
+			uint8_t name[16] = { 0 };
+			bool blank = true;
+
 			printf("fts: no STM at 0x49, probing Melfas at 0x48...\n");
-			uint8_t cmd_name[2] = { 0x01, 0x00 };
-			if (i2c_reg_read(0x48, cmd_name, 2, data, 16)) {
+			(void)melfas_read(MELFAS_INFO_PRODUCT, name, sizeof(name));
+			for (unsigned i = 0; i < sizeof(name); i++) {
+				if (name[i] != 0x00 && name[i] != 0xff) {
+					blank = false;
+				}
+			}
+			if (!blank) {
+				uint8_t res[4] = { 0 }, ver[8] = { 0 }, nodes[2] = { 0 }, status = 0;
+
 				is_melfas = true;
-				uint8_t cmd_res[2] = { 0x01, 0x10 };
-				uint8_t res_buf[4];
-				if (i2c_reg_read(0x48, cmd_res, 2, res_buf, 4)) {
-					uint32_t rx = ((uint32_t)res_buf[1] << 8) | res_buf[0];
-					uint32_t ry = ((uint32_t)res_buf[3] << 8) | res_buf[2];
+				printf("melfas: '%c%c%c%c%c%c%c%c' at 0x48\n",
+				    name[0], name[1], name[2], name[3], name[4], name[5], name[6], name[7]);
+
+				if (melfas_read(MELFAS_INFO_RESOLUTION, res, sizeof(res))) {
+					uint32_t rx = ((uint32_t)res[1] << 8) | res[0];
+					uint32_t ry = ((uint32_t)res[3] << 8) | res[2];
 					if (rx > 0 && rx < 65535) max_x = rx;
 					if (ry > 0 && ry < 65535) max_y = ry;
 				}
-				printf("melfas: detected Melfas MSS100 at 0x48 (resolution %ux%u)\n", max_x + 1, max_y + 1);
+				if (melfas_read(MELFAS_INFO_VERSION, ver, sizeof(ver))) {
+					printf("melfas: version boot %02x%02x core %02x%02x %02x%02x %02x%02x\n",
+					    ver[0], ver[1], ver[2], ver[3], ver[4], ver[5], ver[6], ver[7]);
+				}
+				if (melfas_read(MELFAS_INFO_NODE_X, nodes, sizeof(nodes))) {
+					printf("melfas: %u x nodes, %u y nodes\n", nodes[0], nodes[1]);
+				}
+				if (melfas_read_control(MELFAS_CTRL_STATUS, &status, 1)) {
+					printf("melfas: controller status %02x\n", status);
+				}
+
+				/* Android may have left it in low-power (AOT) mode: ask for normal touch. */
+				(void)melfas_set_mode(MELFAS_MODE_TOUCH);
+				(void)melfas_set_trigger(MELFAS_TRIGGER_INTR);
+				printf("melfas: detected Melfas MSS100 at 0x48 (resolution %ux%u)\n",
+				    max_x + 1, max_y + 1);
 			} else {
 				printf("fts: no answer at 0x49 or 0x48 on i2c6 (gpio%u/gpio%u)\n", PIN_SCL, PIN_SDA);
 				thread_terminate(current_thread());
@@ -708,64 +869,60 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 		unsigned got = 0;
 
 		if (is_melfas) {
-			uint8_t cmd_info[2] = { 0x02, 0x10 };
-			uint8_t pkt_info = 0;
-			if (i2c_reg_read(0x48, cmd_info, 2, &pkt_info, 1)) {
+			uint8_t packet = 0;
+
+			if (melfas_read_event(MELFAS_EVENT_PACKET, &packet, 1)) {
 				reads++;
-				uint32_t cat = (pkt_info >> 7) & 1;
-				uint32_t num = pkt_info & 0x7f;
-				if (num > 0) {
-					uint8_t cmd_data[2] = { 0x02, 0x11 };
-					if (cat == 0) {
-						if (num > 10) num = 10;
-						uint32_t byte_len = num * 16;
-						uint8_t ev_buf[160];
-						if (i2c_reg_read(0x48, cmd_data, 2, ev_buf, byte_len)) {
-							for (uint32_t i = 0; i < num; i++) {
-								const uint8_t *p = &ev_buf[i * 16];
-								uint32_t action = (p[0] >> 6) & 3;
-								uint32_t raw_id = (p[0] >> 2) & 0xf;
-								if (action != 0) {
-									uint32_t id = (raw_id >= 1 && raw_id <= 10) ? (raw_id - 1) : (raw_id < FTS_MAX_FINGERS ? raw_id : 0);
-									uint32_t x = ((uint32_t)p[1] << 4) | (p[3] >> 4);
-									uint32_t y = ((uint32_t)p[2] << 4) | (p[3] & 0xf);
+				uint32_t cat = (packet >> 7) & 1;
+				uint32_t num = packet & 0x7f;
 
-									if (action == FTS_ACTION_RELEASE && x == 0 && y == 0 && finger_down[id]) {
-										x = last_x[id];
-										y = last_y[id];
-									}
-									last_x[id] = (uint16_t)x;
-									last_y[id] = (uint16_t)y;
+				if (num > 0 && cat == 0) {
+					uint8_t ev_buf[MELFAS_MAX_FINGERS * MELFAS_EVENT_SIZE];
 
-									if (swap_axes) { uint32_t t = x; x = y; y = t; }
-									if (flip_x) { x = max_x - (x > max_x ? max_x : x); }
-									if (flip_y) { y = max_y - (y > max_y ? max_y : y); }
+					/* A coordinate packet holds up to ten 16-byte events. */
+					if (num > MELFAS_MAX_FINGERS) {
+						num = MELFAS_MAX_FINGERS;
+					}
+					if (melfas_read_event(MELFAS_EVENT_DATA, ev_buf, num * MELFAS_EVENT_SIZE)) {
+						for (uint32_t i = 0; i < num; i++) {
+							const uint8_t *p = &ev_buf[i * MELFAS_EVENT_SIZE];
+							uint32_t action = (p[0] >> 6) & 3;
+							uint32_t raw_id = (p[0] >> 2) & 0xf;
 
-									uint32_t sx = scale(x, max_x);
-									uint32_t sy = scale(y, max_y);
-
-									if (action == FTS_ACTION_PRESS || action == FTS_ACTION_MOVE) {
-										finger_down[id] = true;
-										hakios_touch_post(HAKIOS_TOUCH_DOWN, id, sx, sy);
-										touches++;
-									} else if (action == FTS_ACTION_RELEASE) {
-										finger_down[id] = false;
-										hakios_touch_post(HAKIOS_TOUCH_UP, id, sx, sy);
-									}
-									events++;
-									got++;
-									if (touches <= 50 || (touches % 100) == 0) {
-										printf("melfas touch: id=%u act=%u (%u,%u) -> (%u,%u)\n", id, action, x, y, sx, sy);
-									}
-								}
+							if (action == 0) {
+								continue;
 							}
+							if (events < 12) {
+								printf("melfas: event %02x %02x %02x %02x: id %u, action %u\n",
+								    p[0], p[1], p[2], p[3], raw_id, action);
+							}
+							/*
+							 * Linux's melfas_ts_coordinate_event takes the id as 1..10 and
+							 * subtracts one; 0 is not a finger the chip reports.
+							 */
+							if (raw_id == 0 || raw_id > MELFAS_MAX_FINGERS) {
+								continue;
+							}
+							post_touch(raw_id - 1, action,
+							    ((uint32_t)p[1] << 4) | (p[3] >> 4),
+							    ((uint32_t)p[2] << 4) | (p[3] & 0xf), &events, &touches);
+							got++;
 						}
 					} else {
-						uint8_t drain[128];
-						uint32_t drain_len = num < 128 ? num : 128;
-						(void)i2c_reg_read(0x48, cmd_data, 2, drain, drain_len);
-						status_events++;
+						errors++;
 					}
+				} else if (num > 0) {
+					/* An alert packet: a whole number of bytes, not 16-byte events. */
+					uint8_t drain[128];
+					uint32_t drain_len = num < sizeof(drain) ? num : sizeof(drain);
+
+					if (melfas_read_event(MELFAS_EVENT_DATA, drain, drain_len) && status_events < 8) {
+						printf("melfas: alert %02x %02x %02x %02x (%u bytes)\n",
+						    drain[0], drain_len > 1 ? drain[1] : 0,
+						    drain_len > 2 ? drain[2] : 0, drain_len > 3 ? drain[3] : 0, num);
+					}
+					status_events++;
+					got++;
 				}
 			} else {
 				errors++;
@@ -825,13 +982,20 @@ fts_thread(__unused void *parameter, __unused wait_result_t result)
 			}
 			printf("\n");
 			if (events == 0) {
-				/* Nothing at all yet: ask again, in case the first sense on came before the rails. */
-				(void)fts_write(FTS_CMD_SENSE_OFF, NULL, 0);
-				sleep_us(10000);
-				(void)fts_write(FTS_CMD_SENSE_ON, NULL, 0);
-				sleep_us(30000);
-				(void)fts_write(FTS_CLEAR_ALL_EVENT, NULL, 0);
-				printf("fts: asked the chip to sense again\n");
+				/* Nothing at all yet: ask again, in case the first init came before the rails. */
+				if (is_melfas) {
+					if (melfas_set_mode(MELFAS_MODE_TOUCH)) {
+						printf("melfas: asked for normal touch mode again\n");
+					}
+					(void)melfas_set_trigger(MELFAS_TRIGGER_INTR);
+				} else {
+					(void)fts_write(FTS_CMD_SENSE_OFF, NULL, 0);
+					sleep_us(10000);
+					(void)fts_write(FTS_CMD_SENSE_ON, NULL, 0);
+					sleep_us(30000);
+					(void)fts_write(FTS_CLEAR_ALL_EVENT, NULL, 0);
+					printf("fts: asked the chip to sense again\n");
+				}
 			}
 		}
 
