@@ -42,11 +42,19 @@ The XNU driver only reads the block.
 the double-key bit is cleared and `KP_EN` is set to 1. It leaves pins 89/90/95 alone, which
 the touch driver owns. The loader prints the mode and the first `KP_MEM1`/`KP_MEM2` values.
 
+The loader also masks the keypad's GIC SPI 73 and clears any pending edge: the kernel's driver
+polls and has no interrupt handler, so an enabled IRQ would storm the CPU when a key is pressed.
+On the test unit LK had already left it disabled (`GICD_ISENABLER` read `0x0`), so the mask
+changed nothing; the pinmux and `KP_EN` are what fixed volume up.
+
 The PMIC homekey is still read from `TOPSTATUS` bit 3; if the A22 wires volume down to the
 keypad instead, the `keyraw=1` log will show which `KP_MEM` bit moves. Power is unchanged.
 
 ## Result
 
 The A32's `xnu-a32-emmc-test34-keys2.img` (`buttons=2 keylog=1 keyraw=1`) had all three buttons
-working. On the A22 the keypad bring-up is in the loader and is being tested with
-`buttons=2 keylog=1 keyraw=1`; the PMIC homekey path is unchanged.
+working. On the A22 the loader's keypad bring-up was tested on 2026-11-07 with
+`buttons=2 keylog=1 keyraw=1`: volume up came from the keypad (`KP_MEM1` `0xfbfd`), volume down
+from the PMIC homekey (`TOPSTATUS` `0x6`) and power from the PMIC pwrkey (`TOPSTATUS` `0xc`).
+The keypad's GIC SPI 73 was already disabled, so the mask is a no-op; the bring-up is what
+fixed volume up.

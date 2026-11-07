@@ -3141,6 +3141,13 @@ static int xnu_requested(void)
 #define KPD_SEL         0x20
 #define KPD_EN          0x24
 
+/* The keypad node's interrupt is GIC_SPI 73, so the GIC's interrupt ID is 32 + 73. */
+#define GICD_BASE       0x0c000000ULL
+#define KPD_IRQ_ID      (32 + 73)
+#define GICD_ISENABLER  0x100
+#define GICD_ICENABLER  0x180
+#define GICD_ICPENDR    0x280
+
 static void
 keypad_bring_up(void)
 {
@@ -3159,6 +3166,21 @@ keypad_bring_up(void)
 	} else {
 		out(" (not a plain GPIO/keypad setting, left alone)");
 	}
+
+	/*
+	 * The kernel's driver polls the state registers and has no interrupt handler for the
+	 * keypad, so an enabled SPI 73 would storm the CPU as soon as a key is pressed (LK may
+	 * have enabled it for its own key detection). Mask the interrupt and drop any pending
+	 * edge; the scan and KP_MEM keep working, which is all the driver needs.
+	 */
+	uint32_t irq = 1u << (KPD_IRQ_ID % 32);
+	uint32_t irq_reg = (KPD_IRQ_ID / 32) * 4;
+	out(", IRQ enable ");
+	out_hex(rd32(GICD_BASE + GICD_ISENABLER + irq_reg));
+	wr32(GICD_BASE + GICD_ICPENDR + irq_reg, irq);
+	wr32(GICD_BASE + GICD_ICENABLER + irq_reg, irq);
+	out(" -> ");
+	out_hex(rd32(GICD_BASE + GICD_ISENABLER + irq_reg));
 
 	wr32(KPD_BASE + KPD_DEBOUNCE, 1024 & 0x3fff);      /* the device tree's kpd-key-debounce */
 	wr32(KPD_BASE + KPD_SEL, rd32(KPD_BASE + KPD_SEL) & ~1u);  /* no double-key report */

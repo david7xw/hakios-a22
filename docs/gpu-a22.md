@@ -124,6 +124,11 @@ mali=1 gl=1 metal=1
 
 `metal=1` publishes the Metal discovery properties; `metal_plugin=1` stays off by default.
 
+The 2026-11-07 run with `mali=1 gl=1 metal=1` loaded the GL library: `hakios-gl` reported
+0 errors at about 18 ms a frame, the framebuffer sampled 34-49 fps, and the GPU was 15-34% busy.
+The 17-21 fps samples were app launches/transitions. The wallpaper is still black; that is the
+PosterBoard/wallpaper-data issue (`inject_sb.c`), not the GPU path.
+
 ## Metal
 
 The Mali Metal driver and the AIR→panfrost compiler now build here; the build, the files in
