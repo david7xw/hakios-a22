@@ -3121,6 +3121,60 @@ static int xnu_requested(void)
 	return pmsg_take(boot_xnu_flag, sizeof(boot_xnu_flag) - 1);
 }
 
+/* ---- the keypad, left ready for the kernel's polling driver ---- */
+
+/*
+ * The A22's volume-up key is keypad hardware key 1, which the matrix lays out as row 0,
+ * column 1: KPROW0 (GPIO92) and KPCOL1 (GPIO94). Linux's kpd driver configures those pins,
+ * sets the debounce and enables the controller's scan; this kernel's driver only reads the
+ * state registers, so the loader leaves the block in the state that driver expects. The other
+ * two pins of the usual 2x2 matrix, KPROW1 (GPIO91) and KPCOL0 (GPIO93), are set as well.
+ *
+ * The GPIO block's mode register holds four bits per pin, eight pins per register; pins 91
+ * to 94 are the four nibbles at 0x3b0 (0x300 + (91 / 8) * 0x10), so one read-modify-write
+ * both keeps pins 89, 90 and 95 as the touch driver leaves them and selects function 1.
+ */
+#define KPD_BASE        0x10010000ULL
+#define KPD_GPIO_BASE   0x10005000ULL
+#define KPD_GPIO_MODE   (0x300 + (91 / 8) * 0x10)
+#define KPD_DEBOUNCE    0x18
+#define KPD_SEL         0x20
+#define KPD_EN          0x24
+
+static void
+keypad_bring_up(void)
+{
+	uint32_t mask = 0, mode, nibbles;
+
+	for (unsigned pin = 91; pin <= 94; pin++) {
+		mask |= 0xfu << ((pin % 8) * 4);
+	}
+	mode = rd32(KPD_GPIO_BASE + KPD_GPIO_MODE);
+	nibbles = (mode >> 12) & 0xffff;
+	out("keypad: GPIO91-94 mode ");
+	out_hex(mode);
+	if ((nibbles & ~0x1111u) == 0) {
+		/* 0 is plain GPIO, 1 is the keypad function: either is ours to take. */
+		wr32(KPD_GPIO_BASE + KPD_GPIO_MODE, (mode & ~mask) | (0x1111u << 12));
+	} else {
+		out(" (not a plain GPIO/keypad setting, left alone)");
+	}
+
+	wr32(KPD_BASE + KPD_DEBOUNCE, 1024 & 0x3fff);      /* the device tree's kpd-key-debounce */
+	wr32(KPD_BASE + KPD_SEL, rd32(KPD_BASE + KPD_SEL) & ~1u);  /* no double-key report */
+	wr32(KPD_BASE + KPD_EN, 1);
+
+	out(", enabled, mode ");
+	out_hex(rd32(KPD_GPIO_BASE + KPD_GPIO_MODE));
+	out(", status ");
+	out_hex(rd32(KPD_BASE));
+	out(", mem ");
+	out_hex(rd32(KPD_BASE + 0x04));
+	out(" ");
+	out_hex(rd32(KPD_BASE + 0x08));
+	out("\n");
+}
+
 static int boot_choice(void)
 {
 	int xnu = MENU_DEFAULT_XNU || xnu_requested();
@@ -3555,6 +3609,7 @@ void mtkloader_main(uint64_t dtb)
 	out("LK dtb ");
 	out_hex(dtb);
 	out("\n");
+	keypad_bring_up();
 	watcher_display_kick();
 	connsys_dt_report(dtb);         /* Wi-Fi step 1: what Android's tree says of CONNSYS (mtkconnsys.h) */
 	run_xnu();

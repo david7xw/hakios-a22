@@ -108,6 +108,22 @@ bring-up runs.
 
 
 
+## Why `gl=1` is needed on the A22
+
+`mali=1` starts the GPU and publishes the `RedwoodMali` IOKit service. The window server's
+`inject.c` (`opengl_es()`) loads `/redwood/lib/libhakios.gl.dylib` only when the boot arguments
+say `gl=1`, or when a `HakiosGPU` service is present. The Mali path publishes `RedwoodMali`, not
+`HakiosGPU`, so with `mali=1` alone CoreAnimation keeps its software renderer: the home screen
+runs at 10-15 fps and the wallpaper stays black. The root image already carries the GL/Metal
+libraries (`libOSMesa.8.dylib`, `libhakios.gl.dylib`, `libredwoodmetal.dylib`,
+`RedwoodMetal.bundle`), so the fix is the boot argument:
+
+```
+mali=1 gl=1 metal=1
+```
+
+`metal=1` publishes the Metal discovery properties; `metal_plugin=1` stays off by default.
+
 ## Metal
 
 The Mali Metal driver and the AIR→panfrost compiler now build here; the build, the files in
