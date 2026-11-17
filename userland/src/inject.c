@@ -34,6 +34,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <notify.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -755,7 +756,7 @@ static const struct virtual_service_callbacks service_callbacks = {
  * the service is made again until the server has opened it.
  */
 static IOHIDServiceClientRef
-make_service(IOHIDEventSystemClientRef client, const char *product, int page, int usage, bool display)
+make_service(IOHIDEventSystemClientRef client, const char *product, int page, int usage, bool display, int tries)
 {
 	struct service *made = calloc(1, sizeof(*made));
 	IOHIDServiceClientRef service = NULL;
@@ -786,7 +787,7 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
 	}
 	/* the dictionary stays: it is what service_copy_property() answers from */
 	made->properties = properties;
-	for (int attempt = 1; attempt <= 20; attempt++) {
+	for (int attempt = 1; attempt <= tries; attempt++) {
 		made->opened = false;
 		service = IOHIDVirtualServiceClientCreateWithCallbacks(client, properties, &service_callbacks, NULL, made);
 		if (service == NULL) {
@@ -878,7 +879,12 @@ send_button(IOHIDServiceClientRef buttons, const struct hakios_touch *t)
 	}
 	if (t->finger == HAKIOS_BUTTON_LOCK) {
 		publish_lock_button(t->type == HAKIOS_BUTTON_DOWN);
+	} else if (t->finger == HAKIOS_BUTTON_VOLUME_UP && t->type == HAKIOS_BUTTON_DOWN) {
+		notify_post("com.hakios.button.volup");
+	} else if (t->finger == HAKIOS_BUTTON_VOLUME_DOWN && t->type == HAKIOS_BUTTON_DOWN) {
+		notify_post("com.hakios.button.voldown");
 	}
+	say("BTN %u %u\n", t->type, t->finger);
 	event = IOHIDEventCreateKeyboardEvent(NULL, t->time, HID_PAGE_CONSUMER, usage, t->type == HAKIOS_BUTTON_DOWN, 0);
 	IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
 	IOHIDVirtualServiceClientDispatchEvent(buttons, event);
@@ -933,13 +939,35 @@ input_thread(__unused void *arg)
 			continue;
 		}
 		IOHIDEventSystemClientScheduleWithDispatchQueue(client, dispatch_queue_create("redwood.input", NULL));
-		screen = make_service(client, "HakiOS touch screen", HID_PAGE_DIGITIZER, HID_USAGE_TOUCH_SCREEN, true);
+		screen = make_service(client, "HakiOS touch screen", HID_PAGE_DIGITIZER, HID_USAGE_TOUCH_SCREEN, true, 20);
 		if (screen == NULL) {
 			say("hakios: input: a HID client of type %d may not create services\n", types[i]);
 		}
 	}
 	if (screen != NULL) {
-		buttons = make_service(client, "HakiOS buttons", HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_CONTROL, false);
+		IOHIDEventSystemClientRef button_client = NULL;
+		int button_page = 0;
+
+		for (unsigned i = 0; buttons == NULL && i < sizeof(types) / sizeof(types[0]); i++) {
+			button_client = IOHIDEventSystemClientCreateWithType(NULL, types[i], NULL);
+			if (button_client == NULL) {
+				continue;
+			}
+			IOHIDEventSystemClientScheduleWithDispatchQueue(button_client,
+			    dispatch_queue_create("redwood.buttons", NULL));
+			buttons = make_service(button_client, "HakiOS buttons", HID_PAGE_CONSUMER,
+			    HID_USAGE_CONSUMER_CONTROL, false, 5);
+			if (buttons != NULL) {
+				button_page = HID_PAGE_CONSUMER;
+			} else {
+				/* A keyboard service is the one the event server is sure to open. */
+				buttons = make_service(button_client, "HakiOS buttons", 0x07, 0x00, false, 3);
+				if (buttons != NULL) {
+					button_page = 0x07;
+				}
+			}
+		}
+		say("BTN svc %p page %d\n", (void *)buttons, button_page);
 	}
 	say("hakios: input: touch screen service %p, buttons %p\n", (void *)screen, (void *)buttons);
 	dispatch_semaphore_signal(input_services_made); /* see wait_for_als_arrival() */
@@ -1077,6 +1105,92 @@ opengl_es(void)
 	gl_function_refused = (void (*)(unsigned))dlsym(library, "hakios_gl_function_refused");
 }
 
+/*
+ * What CoreAnimation's Metal renderer looks for when it starts (CA::OGL::MetalContext asserts metallib_url != nil:
+ * this image, made for the iPhone X, has no default.metallib in QuartzCore.framework, only default.pipelinelib).
+ * Every NSBundle lookup of a "metallib" or "pipelinelib" resource in the window server is said, with what it found;
+ * boot-arg ca_metallib=PATH answers a lookup of default.metallib that found nothing with PATH.
+ */
+static id (*orig_url_for)(id self, SEL selector, id name, id extension);
+static id (*orig_url_for_in)(id self, SEL selector, id name, id extension, id subdirectory);
+static const char *ca_metallib;
+static unsigned lookups_said;
+
+static const char *
+utf8(id string)
+{
+	return string != NULL ? ((const char *(*)(id, SEL))objc_msgSend)(string, sel_registerName("UTF8String")) : "(nil)";
+}
+
+static id
+metallib_answer(id self, id name, id extension, id found)
+{
+	const char *ext = extension != NULL ? utf8(extension) : "";
+
+	if (strstr(ext, "metallib") == NULL && strstr(ext, "pipelinelib") == NULL) {
+		return found;
+	}
+	if (lookups_said++ < 40) {
+		id path = found != NULL ? ((id (*)(id, SEL))objc_msgSend)(found, sel_registerName("path")) : NULL;
+
+		say("hakios: %s asks bundle %s for %s.%s: %s\n", getprogname(),
+		    utf8(((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("bundlePath"))), utf8(name), ext,
+		    found != NULL ? utf8(path) : "nothing");
+	}
+	if (found == NULL && ca_metallib != NULL && name != NULL && strcmp(utf8(name), "default") == 0 &&
+	    strcmp(ext, "metallib") == 0) {
+		id text = ((id (*)(Class, SEL, const char *))objc_msgSend)(objc_getClass("NSString"),
+		    sel_registerName("stringWithUTF8String:"), ca_metallib);
+
+		return ((id (*)(Class, SEL, id))objc_msgSend)(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), text);
+	}
+	return found;
+}
+
+static id
+my_url_for(id self, SEL selector, id name, id extension)
+{
+	return metallib_answer(self, name, extension, orig_url_for(self, selector, name, extension));
+}
+
+static id
+my_url_for_in(id self, SEL selector, id name, id extension, id subdirectory)
+{
+	return metallib_answer(self, name, extension, orig_url_for_in(self, selector, name, extension, subdirectory));
+}
+
+static void
+watch_metallib_lookups(const char *arguments)
+{
+	static char path[256];
+	const char *at = strstr(arguments, "ca_metallib=");
+	Class bundle = objc_getClass("NSBundle");
+	Method two, three;
+
+	if (at != NULL) {
+		size_t length = strcspn(at + 12, " ");
+
+		if (length < sizeof(path)) {
+			memcpy(path, at + 12, length);
+			path[length] = '\0';
+			ca_metallib = path;
+		}
+	} else if (access("/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib", R_OK) == 0) {
+		ca_metallib = "/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib";
+	}
+	if (bundle == NULL) {
+		return;
+	}
+	if ((two = class_getInstanceMethod(bundle, sel_registerName("URLForResource:withExtension:"))) != NULL) {
+		orig_url_for = (id (*)(id, SEL, id, id))method_setImplementation(two, (IMP)my_url_for);
+	}
+	if ((three = class_getInstanceMethod(bundle, sel_registerName("URLForResource:withExtension:subdirectory:"))) != NULL) {
+		orig_url_for_in = (id (*)(id, SEL, id, id, id))method_setImplementation(three, (IMP)my_url_for_in);
+	}
+	say("hakios: metallib lookups in %s are intercepted%s%s\n", getprogname(), ca_metallib ? "; default.metallib -> " : "",
+	    ca_metallib ? ca_metallib : "(none)");
+}
+
 __attribute__((constructor))
 static void
 hakios_init(void)
@@ -1124,6 +1238,7 @@ hakios_init(void)
 				say("hakios: caenv: %s=%s for the window server\n", setting, equals + 1);
 			}
 		}
+		watch_metallib_lookups(arguments);
 		opengl_es();
 		window_server_fixes();
 		/*
@@ -1134,6 +1249,11 @@ hakios_init(void)
 		 * survive; not tried again since, and until it is, the five seconds stay.)
 		 */
 		input_start();
+	} else if (strncmp(name, "com.apple.WebKit.GPU", 20) == 0) {
+		char arguments[1024] = "";
+		size_t size = sizeof(arguments) - 1;
+		sysctlbyname("kern.bootargs", arguments, &size, NULL, 0);
+		watch_metallib_lookups(arguments);
 	} else if (strncmp(name, "containermanagerd", 17) == 0) {
 		container_manager_fixes();
 	}

@@ -229,7 +229,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# our library for inside stock Darwin programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libhakios.dylib src/inject.c
-		$DYN -dynamiclib -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -framework IOSurface -lobjc \
 			-o obj/libhakios.sb.dylib src/inject_sb.c
 		# ... the tweak loader of the package manager's prefix (src/inject_tweaks.c): it goes into a
 		# program either as the one library the kernel inserts or opened by a library of ours
@@ -349,6 +349,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# and the driver dlopens this name.
 		ln -sfn libOSMesa.8.dylib root/lib/libredwoodair.dylib
 		[ ! -f share/rwm-recipes.txt ] || { mkdir -p root/share; cp share/rwm-recipes.txt root/share/rwm-recipes.txt; }
+		[ ! -f share/hakios-wallpaper.raw ] || { mkdir -p root/share; cp share/hakios-wallpaper.raw root/share/hakios-wallpaper.raw; }
 	fi
 	if [ -n "$GL" ]; then
 		cp obj/libOSMesa.8.dylib root/lib/
@@ -430,6 +431,10 @@ fi
 if [ -d ../fw-gpu ]; then
 	mkdir -p root/fw
 	cp ../fw-gpu/* root/fw/
+fi
+if [ -d ../fw-connsys ]; then
+	mkdir -p root/fw/connsys
+	cp ../fw-connsys/* root/fw/connsys/
 fi
 # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
 # (drivers/wifi/hakios.wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
