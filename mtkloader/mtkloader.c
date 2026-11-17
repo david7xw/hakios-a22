@@ -129,6 +129,11 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #ifndef XNU_CHAIN_ANDROID
 #define XNU_CHAIN_ANDROID   0
 #endif
+/* 1: after XNU returns, draw the last log lines and a red rule on the screen and wait 20 s.
+ * 0: go straight on, for a normal image where that overlay is only in the way. */
+#ifndef XNU_LOG_TAIL
+#define XNU_LOG_TAIL        1
+#endif
 /*
  * 1: the system image stays on the eMMC and the kernel reads it as it needs it (emmc_root=1,
  * bsd/dev/redwood_emmc.c), the default; 0: it is read into DRAM here as md0 -- 2.4 GB of the kernel's 4 GB,
@@ -1556,8 +1561,10 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 	out("post-XNU display:\n");
 	screen_stats();
 	display_dump();
+#if XNU_LOG_TAIL
 	show_log_tail(40);
 	dbg_delay_ms(20000);
+#endif
 #if XNU_CHAIN_ANDROID
 	/* Keep the ramoops console intact: Android's pstore reader can then show the XNU log. */
 	chain_android();
