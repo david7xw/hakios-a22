@@ -228,7 +228,37 @@ hakios_input_init(void)
 	hakios_net_init();
 	hakios_adreno_init();
 	hakios_mali_init();
+	redwood_connsys_init();
+	redwood_mtkcam_init();
 	hakios_wifi_init();
 	hakios_adsp_init();
 	hakios_mpss_init();
+}
+
+/* One transaction at a time on the MT6358 PMIC wrapper (0x1000d000) WACS2 channel. */
+static LCK_GRP_DECLARE(hakios_pwrap_grp, "hakios-pwrap");
+static LCK_MTX_DECLARE(hakios_pwrap_mtx, &hakios_pwrap_grp);
+
+void
+hakios_pwrap_lock(void)
+{
+	lck_mtx_lock(&hakios_pwrap_mtx);
+}
+
+void
+hakios_pwrap_unlock(void)
+{
+	lck_mtx_unlock(&hakios_pwrap_mtx);
+}
+
+void
+redwood_pwrap_lock(void)
+{
+	hakios_pwrap_lock();
+}
+
+void
+redwood_pwrap_unlock(void)
+{
+	hakios_pwrap_unlock();
 }

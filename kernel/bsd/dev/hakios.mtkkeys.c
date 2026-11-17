@@ -75,15 +75,19 @@ pwrap_wait(uint32_t state)
 static bool
 pmic_read(uint32_t reg, uint32_t *value)
 {
+	hakios_pwrap_lock();
 	if (!pwrap_wait(PWRAP_FSM_IDLE)) {
+		hakios_pwrap_unlock();
 		return false;
 	}
 	wr(pwrap, PWRAP_WACS2_CMD, (reg >> 1) << 16);
 	if (!pwrap_wait(PWRAP_FSM_WFVLDCLR)) {
+		hakios_pwrap_unlock();
 		return false;
 	}
 	*value = rd(pwrap, PWRAP_WACS2_RDATA) & 0xffff;
 	wr(pwrap, PWRAP_WACS2_VLDCLR, 1);
+	hakios_pwrap_unlock();
 	return true;
 }
 
@@ -126,8 +130,20 @@ mtkkeys_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 		last_top = top;
 		memcpy(last_raw, mem, sizeof(last_raw));
-		now[0] = !(mem1 & (1u << KEY_VOLUME_UP_HW));
-		now[1] = !(top & HOMEKEY_DEB);
+		/*
+		 * Volume Up: Keypad Key 1 (MEM1 bit 1) or Key 0 (MEM1 bit 0).
+		 * Volume Down: PMIC HOMEKEY (TOPSTATUS bit 3), Keypad Matrix Key 17 (MEM2 bit 1),
+		 * or Keypad Key 1 (MEM1 bit 1 when Key 0 is Volume Up).
+		 */
+		bool vup = !(mem[0] & (1u << 1)) || !(mem[0] & (1u << 0));
+		bool vdown = !(top & HOMEKEY_DEB) || !(mem[1] & (1u << 1));
+		if (!(mem[0] & (1u << 0))) {
+			/* If Key 0 is down, that is Volume Up; then Key 1 in MEM1 is Volume Down. */
+			vup = true;
+			vdown = vdown || !(mem[0] & (1u << 1));
+		}
+		now[0] = vup;
+		now[1] = vdown;
 		now[2] = !(top & PWRKEY_DEB);
 
 		for (unsigned i = 0; i < 3; i++) {

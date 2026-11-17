@@ -58,6 +58,15 @@ int hakios_battery_temperature(void);  /* the battery's temperature in C, -273 w
 /* one transfer at a time through the PMIC arbiter for this system (bsd/dev/hakios.buttons.c) */
 void hakios_spmi_lock(void);
 void hakios_spmi_unlock(void);
+/* one transaction at a time on the MT6358 PMIC wrapper WACS2 channel (0x1000d000) */
+void hakios_pwrap_lock(void);
+void hakios_pwrap_unlock(void);
+void redwood_pwrap_lock(void);
+void redwood_pwrap_unlock(void);
+void redwood_connsys_init(void);       /* boot-arg connsys_step=N: MT6768/MT6769 CONNSYS (Wi-Fi/BT) */
+void redwood_mtkwifi_init(void);
+void redwood_btsk_init(void);
+void redwood_mtkcam_init(void);        /* boot-arg mtkcam=N: MT6768/MT6769 camera ISP */
 /*
  * How the battery is, as the audio DSP's battery manager says (bsd/dev/hakios.adsp.c, with adsp=1):
  * handed to bsd/dev/hakios.battery.c, which keeps it for the sysctls kern.hakios.battery_* and

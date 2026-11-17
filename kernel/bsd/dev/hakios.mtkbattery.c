@@ -84,26 +84,34 @@ pwrap_wait(uint32_t state)
 static bool
 pmic_read(uint32_t reg, uint32_t *value)
 {
+	hakios_pwrap_lock();
 	if (!pwrap_wait(PWRAP_FSM_IDLE)) {
+		hakios_pwrap_unlock();
 		return false;
 	}
 	wr(pwrap, PWRAP_WACS2_CMD, (reg >> 1) << 16);
 	if (!pwrap_wait(PWRAP_FSM_WFVLDCLR)) {
+		hakios_pwrap_unlock();
 		return false;
 	}
 	*value = rd(pwrap, PWRAP_WACS2_RDATA) & 0xffff;
 	wr(pwrap, PWRAP_WACS2_VLDCLR, 1);
+	hakios_pwrap_unlock();
 	return true;
 }
 
 static bool
 pmic_write(uint32_t reg, uint32_t value)
 {
+	hakios_pwrap_lock();
 	if (!pwrap_wait(PWRAP_FSM_IDLE)) {
+		hakios_pwrap_unlock();
 		return false;
 	}
 	wr(pwrap, PWRAP_WACS2_CMD, (1u << 31) | ((reg >> 1) << 16) | (value & 0xffff));
-	return pwrap_wait(PWRAP_FSM_IDLE);
+	bool ok = pwrap_wait(PWRAP_FSM_IDLE);
+	hakios_pwrap_unlock();
+	return ok;
 }
 
 /* One BATADC conversion: the request, 128 averages of 10 us, then the ready bit. */
