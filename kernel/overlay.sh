@@ -32,11 +32,17 @@ for line in \
 	'bsd/dev/hakios.mtkbattery.c              standard' \
 	'bsd/dev/hakios.mtkcpufreq.c              standard' \
 	'bsd/dev/hakios.mtkkeys.c                 standard' \
-	'bsd/dev/hakios.scp.c                     standard'
+	'bsd/dev/hakios.scp.c                     standard' \
+	'bsd/dev/redwood_connsys.c                standard' \
+	'bsd/dev/redwood_mtkwifi.c                standard' \
+	'bsd/dev/redwood_wpa.c                    standard' \
+	'bsd/dev/redwood_btsk.c                   standard' \
+	'bsd/dev/redwood_mtkcam.c                 standard'
 do
 	append_once "$TREE/bsd/conf/files" "$line"
 done
 append_once "$TREE/iokit/conf/files" 'iokit/Kernel/hakios.mali.cpp            optional iokitcpp'
+append_once "$TREE/iokit/conf/files" 'iokit/Kernel/RedwoodBluetooth.cpp       optional iokitcpp'
 
 # The copied files must look newer than drivers/ so xnu/sync-drivers.sh does not put the common
 # (Qualcomm) versions back over them.

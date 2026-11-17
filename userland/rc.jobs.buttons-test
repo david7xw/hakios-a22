@@ -1,0 +1,12 @@
+# Commands run by the launchd job com.hakios.demo (RC_JOBS=rc.jobs.buttons-test).
+# The kernel's mtkkeys driver already reports volume up/down and power; this job injects the
+# same records through /dev/hakios-touch, so the backboardd side can be tested without the
+# keypad. Watch for the volume HUD after the wait, and for the screen locking at the end.
+/redwood/bin/rwtouch wait 30
+/redwood/bin/say_run /redwood/bin/rwtouch button volup 200
+/redwood/bin/say_run /redwood/bin/rwtouch button voldown 200
+/redwood/bin/say_run /redwood/bin/metal_props show
+/redwood/bin/say_run /redwood/bin/metal_props on
+/redwood/bin/say_run /redwood/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/redwood/bin/say_run /redwood/bin/metal_props off
+/redwood/bin/say_run /redwood/bin/rwtouch button lock 200

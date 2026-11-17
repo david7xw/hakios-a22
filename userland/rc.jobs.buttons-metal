@@ -1,0 +1,12 @@
+# Commands run by the launchd job com.hakios.demo (RC_JOBS=rc.jobs.buttons-metal).
+# Buttons: the kernel's mtkkeys driver posts volume up/down and power to /dev/hakios-touch;
+# libhakios.dylib in backboardd turns them into HID events. The BTN lines say whether the
+# buttons service was made and whether each event reached send_button().
+# Metal: enumerate what the image believes, publish the properties, then run one draw through
+# the Mali Metal driver with Apple's own fragment shader. say_run puts the output in the
+# kernel log, which the loader saves to pstore when the run returns.
+/redwood/bin/rwtouch wait 25
+/redwood/bin/say_run /redwood/bin/metal_props show
+/redwood/bin/say_run /redwood/bin/metal_props on
+/redwood/bin/say_run /redwood/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/redwood/bin/say_run /redwood/bin/metal_props off
